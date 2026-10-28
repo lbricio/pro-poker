@@ -1,9 +1,28 @@
-# Poker Trainer
+# Pro Poker Trainer
 
-Simulador instrutivo de probabilidades de mãos de Texas Hold'em, para macOS e Linux (Python + PySide6).
+Treinador de decisões de Texas Hold'em No-Limit para macOS e Linux (Python + PySide6), em português e inglês.
 
-Você recebe uma mão, arrasta a barra até o seu palpite da chance de vencer e o app mostra a probabilidade
-real (calculada por simulação), as cartas dos oponentes, o resto da mesa e uma explicação da mão.
+Em cada mão de treino você vê suas cartas, a mesa e a situação de aposta e escolhe **Desistir**, **Passar/Pagar**
+ou **Apostar/Aumentar**. O app calcula a sua chance real (por simulação), compara com o preço da aposta (pot odds)
+e com o limite para apostar por valor, diz qual era a melhor jogada e explica por quê. Depois, dá para colocar tudo
+em prática num cash game ou num torneio contra bots com personalidade.
+
+## Telas
+
+**Menu principal** — modos de jogo em cima, modos de treino embaixo e as páginas de apoio (Como jogar, tabela de
+probabilidades, estatísticas, dicas e configurações).
+
+![Menu principal](docs/screenshots/menu.png)
+
+**Torneio** — mesa de feltro verde, rodada e dificuldade no topo, status colorido de cada jogador (quem desistiu fica
+apagado), histórico da mão e o seu perfil ao lado.
+
+![Modo torneio](docs/screenshots/torneio_mesa.png)
+
+**Treino de decisões** — depois da jogada: a nota, a sua chance **contra a faixa de quem apostou** (e quanto seria
+contra cartas aleatórias), a posição, o stack efetivo, o preço, o EV em bb e a explicação da mão.
+
+![Modo treino](docs/screenshots/treino.png)
 
 ## Como rodar
 
@@ -14,62 +33,113 @@ uv run pokertrainer        # ou: uv run python -m pokertrainer
 
 ## Modos
 
-| Modo     | O que você vê                 |
-|----------|-------------------------------|
-| Pré-flop | só as 2 cartas da mão          |
-| Flop     | 2 cartas + 3 cartas da mesa    |
-| Turn     | 2 cartas + 4 cartas da mesa    |
-| Pot odds | flop ou turn com uma aposta: estime a chance e decida pagar ou desistir |
-| Jogar    | partida completa (No-Limit Hold'em, blinds 5/10, 1000 fichas) contra bots |
+O menu lateral mostra primeiro os **modos de jogo** (Cash game e Torneio) e, embaixo, os **modos de treino**
+(Pré-flop, Flop, Turn e River).
 
-A "chance de vencer" é a **equidade**: vitórias contam 100% e empates dividem o pote. Ela é calculada contra
-oponentes com cartas aleatórias, até o river, por Monte Carlo (50 mil simulações por padrão, margem de ±0,5 ponto).
+| Modo      | O que é                                                                           |
+|-----------|-----------------------------------------------------------------------------------|
+| Pré-flop  | treino de decisão só com as suas 2 cartas                                          |
+| Flop      | treino com 3 cartas na mesa                                                        |
+| Turn      | treino com 4 cartas na mesa                                                        |
+| River     | treino com a mesa completa                                                         |
+| Cash game | partida completa (No-Limit, blinds 5/10, 1000 fichas) contra bots, com recompra    |
+| Torneio   | rodadas eliminatórias até a mesa final, sem recompra                               |
 
-**Barra de palpite na escala do cenário:** a barra vai da pior à melhor mão possível naquele modo com aquele
-número de jogadores e começa na chance média (100% ÷ jogadores; ex.: 5 na mesa → 20%), marcada com uma linha
-dourada. As barrinhas claras acima dela mostram quão comum é cada chance, para dar noção do que é muito ou
-pouco provável. No pré-flop os limites são exatos (ex.: com 4 oponentes, de 32o ≈ 11% a AA ≈ 56%); no flop e
-no turn o máximo é 100% (dá para ter a mão imbatível) e o mínimo é estimado por simulação.
+**Páginas de apoio:** Como jogar, Tabela de probabilidades, Estatísticas, Dicas e Configurações têm um botão
+**✕ Fechar** (ou Esc) que volta para onde você estava — a mesa do treino, a partida ou o início.
 
-**Oponentes:** acima das cartas, o botão "N OPONENTES" escolhe de 1 a 9 oponentes e o botão "🎲 Aleatório"
-sorteia o número de oponentes a cada mão (a barra se ajusta ao cenário sorteado).
+**Como jogar:** no menu lateral, uma página rolável com todas as regras — cartas, blinds, rodadas de apostas, ações,
+ranking das mãos com exemplos, desempates, all-in e potes paralelos, e as regras de cada modo do app.
 
-**Pot odds:** o oponente 1 aposta (os demais pagam) e você decide pagar ou desistir. A barra mostra a chance
-mínima para pagar (aposta ÷ pote final) e o app diz se a decisão foi certa e quanto pagar vale em média (EV).
+## Treino de decisões
 
-**Faixa dos oponentes (ranges):** "Faixa: …" acima das cartas (ou em Configurações) faz os oponentes jogarem só
-o top 50/30/15/8% das mãos iniciais, em vez de mãos aleatórias. As dicas comparam a chance contra a faixa com a
-chance contra mãos aleatórias. Contra faixas a barra usa a escala de 0 a 100%.
+**A situação** tem posição, stack efetivo (40 a 150 bb) e o que cada oponente fez — mostrado no assento de cada um
+(ex.: "CO · apostou 8 bb"). Os valores aparecem em big blinds. Teclas: **F** desistir, **C** passar/pagar,
+**R** apostar/aumentar, **Espaço**/**Enter**/**S** próxima mão.
 
-**Estatísticas e revisão:** gráfico do erro por mão com média móvel, tendência (superestima/subestima), erro por
-tipo de mão, decisões e EV no pot odds, e as últimas mãos — dois cliques reabrem a mão na mesa para revisar.
-"Treinar meu ponto fraco" (ou dois cliques num tipo de mão) distribui só mãos desse tipo até você clicar no ✕.
+- **Pré-flop:** *abrir* (todos desistiram até você — a posição define a faixa de abertura, do ~14% no UTG ao ~42% no
+  botão), *contra um aumento* (você no botão ou no big blind, com quem aumentou e quem pagou) e *contra limpers*
+  (você no big blind: passar ou isolar).
+- **Depois do flop:** um pote de aumento pré-flop (você ou o oponente 1 aumentou), com as ruas anteriores já jogadas;
+  ou passaram para você / você fala primeiro, ou o oponente 1 apostou e outros pagaram.
+- **Tamanho:** ao apostar ou aumentar você escolhe o tamanho (⅓, ½, ⅔ ou pote; 2,5×, 3× ou all-in; 2,2–3 bb para
+  abrir). A nota também olha o tamanho.
 
-**Modos de jogo (Cash game e Torneio):** mesa oval com 1 a 9 bots. Você desiste, passa/paga ou aposta/aumenta (atalhos ½ pote,
-¾, pote, all-in; teclas F, C e R). A cada aposta que você enfrenta, o app mostra as pot odds e, depois, se a
-decisão fez sentido (🎓 no histórico da mão). Há potes paralelos (all-in de stacks diferentes), recompra quando
-você quebra, e bots que quebram dão lugar a novos jogadores. Em Configurações: dificuldade (Fácil, Médio, Difícil,
-Semi-pro, Pro), velocidade dos bots, assistente de chance e "modo aprendizado" (mostra a personalidade, o humor e,
-no fim da mão, quem blefou).
+**As cartas dos oponentes saem das faixas de quem fez o que fez** — ninguém aumenta, aposta ou paga com qualquer mão.
+Antes do flop a faixa vem da posição e da ação (abertura por posição, quem paga um aumento, quem só paga o big blind);
+depois do flop cada combinação ganha peso pela classe da mão naquela mesa (dois pares+, par alto, par fraco, projeto
+forte, projeto fraco, nada) e pela ação (apostou, pagou, passou). A sua chance é calculada contra essas faixas, por
+Monte Carlo, e o app mostra também quanto seria contra cartas aleatórias, para comparar.
+
+**A nota:**
+
+- **Abrir:** pela tabela de aberturas da posição (no limite, abrir ou desistir são aceitáveis; entrar só pagando,
+  nunca).
+- **Pagar:** só se a chance contra a faixa de quem apostou passar do preço (*aposta ÷ pote final*). **Fora de
+  posição** o preço sobe 4 pontos (você realiza menos da sua chance); **projetos fortes com stack fundo** ganham
+  odds implícitas (5 pontos a menos).
+- **Apostar/aumentar por valor:** só se você estiver à frente das **mãos que pagariam** (mais de 50% heads-up,
+  42% multiway) — não basta estar à frente da faixa inteira. Re-aumento pré-flop (3-bet) com as mãos do topo.
+- **Semiblefe:** projetos fortes no flop e no turn podem apostar; no river, um blefe pequeno em posição contra quem
+  passou é aceitável.
+- **Tamanho:** jogada certa com tamanho fora do recomendado vira "aceitável" (ex.: mão muito forte → ⅔ do pote ou
+  mais; valor fino → ⅓ a ⅔; aumento de 2,5–3×; all-in com SPR baixo).
+
+Cada decisão vale 100 pontos (melhor jogada), 40–70 (aceitável) ou 0 (erro). Depois da decisão, as cartas dos
+oponentes e o resto da mesa aparecem; o medidor mostra a sua chance (ou a força da mão, na abertura) sobre as faixas
+de cada jogada, e o painel ao lado explica a decisão, o que aconteceu nas cartas seguintes e por que a mão vale o que
+vale.
+
+**Oponentes e faixas:** acima das cartas, "N OPONENTES" escolhe de 1 a 9 oponentes, "🎲 Aleatório" sorteia o número
+a cada mão e "Faixa" escolhe entre **Pela ação** (realista, o padrão) ou uma faixa fixa (qualquer mão, top
+50/30/15/8%) que ignora a ação — útil para treinar o cálculo puro.
+
+**Estatísticas e revisão:** pontos por decisão com média móvel, % de melhor jogada e de decisões sem erro, EV das
+vezes em que você pagou, acerto por tipo de mão e as últimas decisões — dois cliques reabrem a mão na mesa para
+revisar. "Treinar meu ponto fraco" (ou dois cliques num tipo de mão) distribui só mãos desse tipo até você clicar
+no ✕. A tela inicial tem atalhos para o treino, o cash game e o torneio.
+
+## Cash game e torneio
+
+Mesa de feltro verde (com proporção fixa, centralizada em telas largas) com 1 a 9 bots; quem está na vez tem borda
+amarela, e quem desistiu fica com nome e fichas apagados e as cartas escurecidas. Embaixo de cada jogador aparece a
+última ação, colorida: **passou** em verde, **apostou/aumentou/all-in** em amarelo e **desistiu** em cinza. Você
+desiste, passa/paga ou aposta/aumenta (atalhos ⅓, ½, ¾, pote, all-in; teclas F, C e R). A cada aposta que você
+enfrenta, o app mostra as pot odds e, depois, se a decisão fez sentido (🎓 no histórico da mão) — comparando com a
+sua chance **contra as faixas pela ação de cada bot nesta mão**, não contra mãos aleatórias. O assistente
+(Configurações) mostra essa chance na sua vez. Há potes paralelos, recompra quando você quebra (cash game) e bots que
+quebram dão lugar a novos jogadores.
+
+**Regras de mesa de verdade:** um all-in menor que o aumento mínimo não reabre a ação (quem já agiu só paga ou
+larga); no showdown, mostra primeiro quem apostou por último e quem perde pode **descartar sem mostrar** (o botão
+"Mostrar as cartas de quem descartou" em Configurações liga o modo aprendizado); no torneio há **ante do big
+blind**. O botão **bb** da mesa mostra stacks e apostas em big blinds.
+
+**Histórico de mãos:** cada mão jogada é gravada no formato do **PokerStars**; em Estatísticas → Cash game e torneio,
+"Exportar mãos" salva o arquivo para revisar em outras ferramentas.
 
 A mesa é animada: as apostas ficam em fichas na frente de cada jogador e vão para o pote no fim de cada rua; o
 pote voa para o vencedor ("+340"); as cartas da mesa saem rua a rua; num all-in sem mais apostas, todos mostram as
 cartas e a mesa é "corrida" devagar; no showdown as 5 cartas vencedoras ficam em destaque. Os bots "pensam" por um
 tempo que depende da decisão (all-ins e apostas grandes demoram mais) e às vezes falam (balões), conforme a
 personalidade e o humor. Controles: ⏸ pausar (P), velocidade (🐢/▶/⏩), ⏭ pular o resto da mão quando você já
-saiu, 🔁 próxima mão automática, e pré-ações (passar/desistir, passar, pagar qualquer) enquanto os outros jogam.
-O menu separa os **modos de treino** (Pré-flop, Flop, Turn, Pot odds) dos **modos de jogo**:
+saiu (tecla S, que também vai para a próxima mão; Espaço ou Enter também), ☰ Menu e Histórico para recolher o menu lateral e o
+histórico (a mesa ocupa o espaço), 🔁 próxima mão automática, e pré-ações enquanto os outros jogam (teclas F passar/desistir, C passar, A pagar qualquer).
 
 - **Cash game**: recompra à vontade; bots quebrados são substituídos.
-- **Torneio**: rodadas eliminatórias, sem recompra — **3 rodadas** no Fácil e no Médio, **5** no Difícil e no
-  Semi-pro, **6** no Pro. Cada rodada é uma mesa nova (todos com 1000 fichas, blinds começando em 5/10 e subindo a
-  cada 10 mãos); quando metade da mesa é eliminada, os sobreviventes passam de rodada. Na **mesa final** é preciso
-  ficar com todas as fichas. Quem cai recebe a colocação geral (ex.: "13º lugar de 16"); o número de jogadores do
-  torneio é o tamanho da mesa × 2^(rodadas − 1).
+- **Torneio**: ao entrar, você escolhe a dificuldade numa tela que mostra, para cada uma, as rodadas, o tamanho do
+  torneio e os seus resultados (títulos, torneios jogados e melhor colocação). Rodadas eliminatórias, sem recompra —
+  **3 rodadas** no Fácil e no Médio, **5** no Difícil e no Semi-pro, **6** no Pro. Todos começam com 1000 fichas
+  (100 bb); os blinds sobem a cada **15 mãos do torneio** (o relógio não volta a cada rodada), com **ante do big
+  blind** a partir do 3º nível. Quando metade da mesa é eliminada, os sobreviventes passam de rodada **levando as
+  suas fichas** para uma mesa nova, contra outros classificados com stacks em torno da média da fase. Na **bolha**
+  (falta uma eliminação) o app avisa, o assistente pede folga para pagar e os bots com stack médio ou curto se
+  protegem, enquanto os grandes pressionam. Na **mesa final** é preciso ficar com todas as fichas. Quem cai recebe a
+  colocação geral (ex.: "13º lugar de 16").
 
 **Suas estatísticas (HUD):** no seu assento aparecem VPIP, PFR e AF da partida (passe o mouse para ver todas), e o
 painel lateral mostra "Seu perfil nesta partida" com avaliação de cada número. Tudo é acumulado entre partidas em
-**Estatísticas → Jogo simulado**: mãos, lucro, bb/100, mãos vencidas, decisões certas, torneios, a curva de lucro
+**Estatísticas → Cash game e torneio**: mãos, lucro, bb/100, mãos vencidas, decisões certas, torneios, a curva de lucro
 em big blinds e o perfil completo — VPIP, PFR, 3-bet, AF, c-bet, desiste diante de aposta, WTSD e W$SD —
 comparado com as faixas de um jogador sólido, com o seu estilo (TAG, LAG, calling station…) e sugestões.
 
@@ -84,6 +154,9 @@ dos adversários. Em simulações com ~720 mil mãos-jogador, o ganho cresce com
 Difícil +32, Semi-pro +44, Pro +83 bb/100 em mesas mistas) e os estilos amadores perdem. O humor muda com o jogo
 (tilt 😤, confiança 😎) e as decisões têm uma dose de acaso. Na mesa, cada bot mostra "VPIP/PFR · estilo"; passe o
 mouse para ver tudo (e, no modo aprendizado, a personalidade e como jogar contra ela).
+
+**Posição:** depois do flop, os bots em posição (os últimos a agir) blefam e apostam mais, e fora de posição
+seguram mais — tanto mais quanto maior a habilidade. Antes do flop, abrem mais mãos no fim da mesa.
 
 **Leitura de faixa (Pro):** os bots de habilidade alta (a partir de ~0,80, sobretudo no nível Pro), diante de uma
 aposta depois do flop, estimam com que mãos aquele jogador apostaria naquela mesa — mãos fortes quase sempre, pares e
@@ -130,11 +203,11 @@ acaso, com um fator aleatório em cada decisão. No modo aprendizado, cada bot m
 "você: 😨 x% · 🤨 y%", o histórico avisa quando alguém viu seu blefe ou sua mão forte, a dica (mouse) mostra o que
 ele pensa de cada jogador, e o painel lateral mostra a sua imagem média na mesa.
 
-O número de oponentes do modo Jogar é separado do dos modos de treino: botão 👥 na mesa ou Configurações → Jogo
-simulado → Oponentes na mesa.
+O número de oponentes do cash game e do torneio é separado do dos modos de treino: botão 👥 na mesa ou
+Configurações → Cash game e torneio → Oponentes na mesa.
 
 **Cartas restantes:** ao lado da sua mão, a pilha de cartas mostra quantas cartas ainda não foram vistas; ao
-clicar, abre o baralho inteiro com as cartas já conhecidas (sua mão e mesa; depois da revelação, também as dos
+clicar, abre o baralho inteiro com as cartas já conhecidas (sua mão e mesa; depois da decisão, também as dos
 oponentes) apagadas.
 
 **Idioma:** 🇧🇷 PT/BR ou 🇺🇸 ENG, no canto superior direito (as bandeiras são desenhadas pelo app). A troca reabre a mesma mão no novo idioma.
@@ -158,14 +231,17 @@ pokertrainer/
   engine.py         avaliador de mãos (tabela de produto de primos) + Monte Carlo + outs + faixas
   table.py          mesa de No-Limit Hold'em (apostas, all-in, potes paralelos, showdown)
   ai.py             bots: personalidade, humor/tilt, dificuldade e decisões
-  coach.py          nota do palpite, explicações, tabelas de referência
+  decision.py       treino: situações (posição, stack, tamanhos), melhor jogada, nota e explicação
+  ranges.py         faixas dos oponentes por posição e ação; classes de mão
+  handhistory.py    histórico de mãos no formato do PokerStars
+  coach.py          explicações didáticas, faixas, tipos de mão, tabelas de referência
   settings.py       preferências e estatísticas (QSettings)
   gui/              janela, menu lateral, tela de jogo, páginas, componentes
   assets/           cartas PNG, fundo, tabela pré-flop pré-calculada
 tools/
   fetch_assets.py          baixa e gera as imagens (cartas a partir de SVG, verso, fundo)
   build_preflop_table.py   recalcula assets/preflop_equity.json
-  build_scenarios.py       recalcula assets/scenarios.json (limites e distribuição da barra)
+  simulate_population.py   simula mesas de bots e gera um relatório por nível e personalidade
   make_sounds.py           gera os sons (assets/sounds/*.wav)
 tests/
 ```
@@ -174,7 +250,6 @@ tests/
 uv run pytest                                  # testes
 uv run python tools/fetch_assets.py            # baixa as imagens de novo
 uv run python tools/build_preflop_table.py     # recalcula a tabela pré-flop (~2 min)
-uv run python tools/build_scenarios.py         # recalcula a escala da barra (rodar depois da tabela)
 ```
 
 ## Créditos

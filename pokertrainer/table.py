@@ -87,12 +87,15 @@ def new_uid() -> int:
 
 
 class Table:
-    def __init__(self, players: list[Player], sb: int = 5, bb: int = 10, rng: random.Random | None = None) -> None:
+    def __init__(self, players: list[Player], sb: int = 5, bb: int = 10, rng: random.Random | None = None,
+                 ante: int = 0) -> None:
         self.players = players
         for p in players:
             if not p.uid:
                 p.uid = new_uid()
         self.sb, self.bb = sb, bb
+        self.ante = ante                         # ante do big blind (o BB paga por todos; vai direto ao pote)
+        self.bubble = False                      # torneio: falta uma eliminação para fechar a rodada
         self.rng = rng or random.Random()
         self.dealer = self.rng.randrange(len(players))
         self.board: list[int] = []
@@ -110,6 +113,11 @@ class Table:
         self.pf_aggressor: int | None = None     # último a aumentar antes do flop
         self.winners: dict[int, int] = {}       # assento -> fichas ganhas na mão
         self.showdown_hands: dict[int, int] = {}  # assento -> pontuação no showdown
+        self.shown: list[int] = []               # quem mostrou as cartas no showdown (na ordem); o resto descartou
+        self.street_aggressor: int | None = None  # último a apostar/aumentar nesta rua
+        self.runout = False                      # all-in sem mais apostas: todos mostram as cartas
+        self._acted: set[int] = set()            # agiram desde o último aumento completo
+        self._no_reraise: set[int] = set()       # já agiram e só enfrentam um all-in incompleto: não podem aumentar
 
     # ------------------------------------------------------------ utilidades
     @property
@@ -166,6 +174,10 @@ class Table:
         self.events = []
         self.winners = {}
         self.showdown_hands = {}
+        self.shown = []
+        self.street_aggressor = None
+        self.runout = False
+        self._acted, self._no_reraise = set(), set()
         for p in self.players:
             p.hole, p.bet, p.total = [], 0, 0
             p.folded = p.all_in = False
@@ -193,6 +205,8 @@ class Table:
         bb_seat = self._next(sb_seat, lambda p: not p.sitting_out)
         self._post(sb_seat, self.sb, "SB")
         self._post(bb_seat, self.bb, "BB")
+        if self.ante:
+            self._post_ante(bb_seat, self.ante)
         self.street = "preflop"
         self.current_bet = self.bb
         self.min_raise = self.bb
@@ -214,6 +228,16 @@ class Table:
         p.last_action = f"{label} {amt}"
         self._emit(kind="blind", seat=seat, amount=amt, text=label)
 
+    def _post_ante(self, seat: int, amount: int) -> None:
+        """Ante do big blind: fichas mortas direto no pote (não contam como aposta da rua)."""
+        p = self.players[seat]
+        amt = min(amount, p.stack)
+        p.stack -= amt
+        p.total += amt
+        if p.stack == 0:
+            p.all_in = True
+        self._emit(kind="blind", seat=seat, amount=amt, text="ANTE")
+
     def legal(self, seat: int | None = None) -> Legal:
         seat = self.to_act if seat is None else seat
         p = self.players[seat]
@@ -222,7 +246,8 @@ class Table:
         min_to = min(self.current_bet + self.min_raise, max_to) if self.current_bet else min(self.bb, max_to)
         # só pode aumentar se ainda há alguém para pagar e se tem fichas além do call
         others = [q for i, q in enumerate(self.players) if i != seat and q.can_act]
-        can_raise = p.stack > to_call and bool(others)
+        # um all-in menor que o aumento mínimo não reabre a ação para quem já tinha agido
+        can_raise = p.stack > to_call and bool(others) and seat not in self._no_reraise
         return Legal(to_call=to_call, can_check=to_call == 0, min_raise_to=min_to, max_raise_to=max_to,
                      can_raise=can_raise)
 
@@ -280,9 +305,12 @@ class Table:
                 self.min_raise = raise_by
                 # aumento completo reabre a ação para todos
                 self._pending = {i for i, q in enumerate(self.players) if q.can_act}
+                self._acted, self._no_reraise = set(), set()
             else:
-                # all-in menor que um aumento mínimo: só quem ainda não agiu precisa responder
+                # all-in menor que um aumento mínimo: todos precisam responder, mas quem já agiu só paga ou larga
                 self._pending |= {i for i, q in enumerate(self.players) if q.can_act and q.bet < amount_to}
+                self._no_reraise |= self._acted - {seat}
+            self.street_aggressor = seat
             kind = "bet" if self.current_bet == 0 else "raise"
             self.current_bet = max(self.current_bet, amount_to)
             self.last_aggressor = seat
@@ -300,6 +328,7 @@ class Table:
             p.last_action = "allin" if p.all_in else kind
             self._emit(kind="action", seat=seat, action=p.last_action, amount=p.bet)
         self._pending.discard(seat)
+        self._acted.add(seat)
         self._advance(seat)
 
     def _put(self, p: Player, amt: int) -> None:
@@ -331,6 +360,7 @@ class Table:
             p.bet = 0
         self.current_bet = 0
         self.min_raise = self.bb
+        self._acted, self._no_reraise = set(), set()
         live = [i for i in self.seats_in_hand() if self.players[i].can_act]
         if self.street == "river":
             self._showdown()
@@ -350,11 +380,13 @@ class Table:
             if p.in_hand and not p.all_in:
                 p.last_action = ""
         if len(live) <= 1:
-            # ninguém mais pode apostar: corre as cartas até o river
+            # ninguém mais pode apostar: corre as cartas até o river (todos mostram as cartas)
+            self.runout = True
             self.to_act = None
             self._end_street()
             return
         self._pending = set(live)
+        self.street_aggressor = None
         self.to_act = self._next(self.dealer, lambda q: q.can_act)
 
     def _finish_uncontested(self) -> None:
@@ -389,6 +421,7 @@ class Table:
             self.board.append(self.deck.pop())
         scores = {i: E.evaluate(self.players[i].hole + self.board) for i in self.seats_in_hand()}
         self.showdown_hands = scores
+        self.shown = self._show_order(scores)
         for i in scores:
             self.players[i].showdowns += 1
         self._emit(kind="showdown", data={"scores": dict(scores)})
@@ -407,6 +440,23 @@ class Table:
             self._emit(kind="win", seat=i, amount=amt, text=E.describe(scores[i]))
         self.winners = won
         self._close_hand()
+
+    def _show_order(self, scores: dict[int, int]) -> list[int]:
+        """Quem mostra as cartas: começa pelo último a apostar no river (ou o primeiro à esquerda do botão); depois,
+        cada um só mostra se empata ou vence o melhor já mostrado — quem perde descarta. Num all-in todos mostram."""
+        seats = list(scores)
+        if self.runout:
+            return seats
+        n = len(self.players)
+        start = self.street_aggressor if self.street_aggressor in scores else self._next(
+            self.dealer, lambda q: q.in_hand)
+        order = sorted(seats, key=lambda i: (i - start) % n)
+        shown, best = [], -1
+        for i in order:
+            if scores[i] >= best:
+                shown.append(i)
+                best = scores[i]
+        return shown
 
     def _close_hand(self) -> None:
         self.hand_over = True

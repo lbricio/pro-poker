@@ -1,4 +1,4 @@
-"""Jogo simulado: mesa completa contra bots com personalidade.
+"""Cash game e torneio: mesa completa contra bots com personalidade.
 
 A lógica do jogo (pokertrainer.table) anda na hora; a tela mostra o resultado por uma fila de passos animados
 (fichas indo ao pote, cartas da mesa rua a rua, showdown, pote indo ao vencedor). Os bots só agem quando a fila
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 
 from PySide6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -21,7 +22,9 @@ from PySide6.QtWidgets import (
 
 from pokertrainer import ai
 from pokertrainer import engine as E
+from pokertrainer import handhistory as HH
 from pokertrainer import profile as PF
+from pokertrainer import ranges as RG
 from pokertrainer import settings as S
 from pokertrainer import table as T
 from pokertrainer.i18n import tr
@@ -29,6 +32,12 @@ from pokertrainer.gui import sound
 from pokertrainer.gui.widgets import CARD_RATIO, CardWidget, Glass, PillLabel
 
 START_STACK = 1000
+BTN_H = 56            # altura dos botões de ação e da barra de aposta (alinhados)
+MAX_TABLE_W = 1040    # largura máxima da mesa: em telas largas os assentos não se espalham demais
+MAX_PANEL_W = 1120    # largura máxima da barra de ações
+TABLE_RATIO = 2.15    # largura ÷ altura base da mesa de feltro (fixa: a mesa não estica)
+TABLE_EXTRA_H = 20    # folga vertical para a mesa ocupar o vão entre os assentos
+TABLE_PAD_H = 50      # altura somada à mesa depois da proporção (mesa um pouco mais "alta")
 SB, BB = 5, 10
 SPEEDS = {"slow": 1200, "normal": 700, "fast": 300}
 SPEED_ORDER = ["slow", "normal", "fast"]
@@ -36,6 +45,29 @@ SPEED_ORDER = ["slow", "normal", "fast"]
 
 def speed_names() -> list[tuple[str, str]]:
     return [(tr("Lenta", "Slow"), "slow"), (tr("Normal", "Normal"), "normal"), (tr("Rápida", "Fast"), "fast")]
+
+
+ACTION_COLORS = {"check": "#3ddc84", "bet": "#f5c542", "raise": "#f5c542", "allin": "#f5c542", "fold": "#7f8c88"}
+DEFAULT_ACTION_COLOR = "#e3ece9"
+FADED = "#6f817c"
+
+
+_BB_UNIT = {"bb": 0}   # big blind atual quando os valores aparecem em bb (0 = em fichas)
+
+
+def fmt_amount(v: int) -> str:
+    """Valor em fichas ou em big blinds (opção 'bb' da mesa)."""
+    bb = _BB_UNIT["bb"]
+    if not bb:
+        return str(v)
+    x = v / bb
+    txt = f"{x:.1f}".rstrip("0").rstrip(".") if abs(x - round(x)) > 0.05 else f"{round(x)}"
+    return txt.replace(".", tr(",", ".")) + " bb"
+
+
+def action_color(action: str) -> str:
+    """Cor do status embaixo do jogador: passou em verde, apostou/aumentou em amarelo, desistiu em cinza."""
+    return ACTION_COLORS.get(action, DEFAULT_ACTION_COLOR)
 
 
 def action_text(action: str, amount: int = 0) -> str:
@@ -98,7 +130,7 @@ class ChipStack(QWidget):
         self.update()
 
     def _text(self) -> str:
-        return f"{self.prefix}{self.amount}"
+        return f"{self.prefix}{fmt_amount(self.amount)}"
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
@@ -211,10 +243,14 @@ class PlaySeat(QFrame):
             border, bg = "rgba(255,255,255,0.08)", "rgba(0,0,0,0.10)" if out else "rgba(0,0,0,0.25)"
         self.setStyleSheet(f"QFrame#seat {{ background: {bg}; border: 1px solid {border}; border-radius: 12px; }}")
         for c in self.cards:
+            c.dim_alpha = 205 if folded else 120     # quem desistiu: cartas quase pretas
             c.set_dimmed(folded)
             c.setVisible(not out)
+        # quem saiu da mão (desistiu) ou do jogo fica com o nome apagado
         self.name.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;"
-                                + (" color: #6f817c;" if out else ""))
+                                + (f" color: {FADED};" if out or folded else ""))
+        self.stack.setStyleSheet("font-size: 13px; font-weight: 700; background: transparent; color: "
+                                 + (FADED if out or folded else "#ffe7a3") + ";")
 
     def set_card_height(self, h: int) -> None:
         if self.cards[0].card_height() == max(40, int(h)) and self._sized == self.compact:
@@ -236,10 +272,12 @@ class _Area(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.felt = False
+        self.label = ""
         self.table_rect = QRectF()
 
-    def set_felt(self, on: bool) -> None:
+    def set_felt(self, on: bool, label: str = "") -> None:
         self.felt = on
+        self.label = label
         self.update()
 
     def set_table_rect(self, r: QRectF) -> None:
@@ -302,7 +340,8 @@ class _Area(QWidget):
         p.setFont(f)
         p.setPen(QColor(255, 255, 255, 34))
         band = QRectF(felt.left(), felt.center().y() - f.pixelSize(), felt.width(), f.pixelSize() * 2)
-        p.drawText(band, Qt.AlignCenter, tr("♠  TORNEIO  ♠", "♠  TOURNAMENT  ♠"))
+        if self.label:
+            p.drawText(band, Qt.AlignCenter, f"♠  {self.label}  ♠")
         p.end()
 
 
@@ -311,6 +350,8 @@ class _Area(QWidget):
 class PlayPage(QWidget):
     statsChanged = Signal(dict)
     coachMessage = Signal(str)
+    lobbyRequested = Signal()       # fim do torneio: volta à escolha de dificuldade
+    sidebarToggled = Signal(bool)   # mostrar/esconder o menu lateral (mais espaço para a mesa)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -392,9 +433,16 @@ class PlayPage(QWidget):
         self.log_panel.setFixedWidth(290)
         lv = QVBoxLayout(self.log_panel)
         lv.setContentsMargins(16, 12, 8, 12)
-        title = QLabel(tr("📜  Histórico", "📜  History"))
+        title = QLabel(tr("Histórico", "History"))
         title.setStyleSheet("font-size: 16px; font-weight: 800; color: #f5c542;")
-        lv.addWidget(title)
+        log_head = QHBoxLayout()
+        log_head.addWidget(title)
+        log_head.addStretch(1)
+        close_log = self._chip("✕", lambda: self.set_log_visible(False),
+                               tr("Fechar o histórico (reabra em “Histórico” embaixo)", "Close the history (reopen with “History” below)"))
+        close_log.setStyleSheet("padding: 2px 8px;")
+        log_head.addWidget(close_log)
+        lv.addLayout(log_head)
         self.log = QLabel()
         self.log.setWordWrap(True)
         self.log.setTextFormat(Qt.RichText)
@@ -434,8 +482,9 @@ class PlayPage(QWidget):
         self.pause_btn = self._chip(tr("⏸ Pausar", "⏸ Pause"), self.toggle_pause,
                                     tr("Pausar / continuar (P)", "Pause / resume (P)"))
         self.speed_btn = self._chip("", self.cycle_speed, tr("Velocidade dos bots", "Bot speed"))
-        self.skip_btn = self._chip(tr("⏭ Pular mão", "⏭ Skip hand"), self.skip_hand,
-                                   tr("Termina a mão na hora (você já saiu dela)", "Finish the hand now (you're out)"))
+        self.skip_btn = self._chip(tr("⏭ Pular mão (S)", "⏭ Skip hand (S)"), self.skip_hand,
+                                   tr("Termina a mão na hora, sem esperar os bots (você já saiu dela) — tecla S",
+                                      "Finish the hand now without waiting for the bots (you're out) — S key"))
         self.auto_btn = self._chip(tr("🔁 Auto", "🔁 Auto"), self._toggle_auto,
                                    tr("Próxima mão automática", "Automatic next hand"), checkable=True)
         self.auto_btn.setChecked(S.get("play_autonext"))
@@ -449,7 +498,15 @@ class PlayPage(QWidget):
         self._update_players_btn()
         self.sound_btn = self._chip("", self.toggle_sound, tr("Sons ligados/desligados", "Sounds on/off"))
         self._update_sound_btn()
-        for b in (self.players_btn, self.pause_btn, self.speed_btn, self.skip_btn, self.auto_btn, self.sound_btn):
+        self.menu_btn = self._chip(tr("☰ Menu", "☰ Menu"), lambda: self.set_sidebar_visible(self.menu_btn.isChecked()),
+                                   tr("Mostrar/esconder o menu lateral", "Show/hide the side menu"), checkable=True)
+        self.bb_btn = self._chip("bb", self.toggle_bb, tr("Mostrar valores em big blinds (bb) ou em fichas",
+                                                         "Show amounts in big blinds (bb) or in chips"), checkable=True)
+        self.bb_btn.setChecked(S.get("show_bb"))
+        self.log_btn = self._chip(tr("Histórico", "History"), lambda: self.set_log_visible(self.log_btn.isChecked()),
+                                  tr("Mostrar/esconder o histórico", "Show/hide the history"), checkable=True)
+        for b in (self.menu_btn, self.log_btn, self.bb_btn, self.players_btn, self.pause_btn, self.speed_btn, self.skip_btn,
+                  self.auto_btn, self.sound_btn):
             head.addWidget(b, 0, Qt.AlignTop)
         pv.addLayout(head)
 
@@ -461,12 +518,14 @@ class PlayPage(QWidget):
         self.call_btn.setObjectName("primary")
         self.raise_btn = QPushButton()
         self.raise_btn.setObjectName("primary")
-        self.next_btn = QPushButton(tr("Próxima mão  ▸", "Next hand  ▸"))
+        self.next_btn = QPushButton(tr("Próxima mão (Espaço)  ▸", "Next hand (Space)  ▸"))
         self.next_btn.setObjectName("primary")
+        self.next_btn.setToolTip(tr("Espaço, Enter ou S", "Space, Enter or S"))
         for b in (self.fold_btn, self.call_btn, self.raise_btn, self.next_btn):
             b.setCursor(Qt.PointingHandCursor)
             b.setMinimumWidth(130)
             b.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            b.setFixedHeight(BTN_H)
         for b in (self.call_btn, self.raise_btn):
             b.setMinimumWidth(190)
         self.fold_btn.clicked.connect(lambda: self.hero_act("fold"))
@@ -501,6 +560,10 @@ class PlayPage(QWidget):
         size_box.addLayout(srow)
         self.size_widget = QWidget()
         self.size_widget.setLayout(size_box)
+        # mesma altura dos botões: atalhos alinhados ao topo deles e a barra à base
+        self.size_widget.setFixedHeight(BTN_H)
+        for b in self.quick_btns:
+            b.setFixedHeight(22)
         btns.addWidget(self.size_widget, 1)
         btns.addWidget(self.raise_btn)
         btns.addWidget(self.next_btn)
@@ -515,8 +578,9 @@ class PlayPage(QWidget):
         self.pre_group = QButtonGroup(self)
         self.pre_group.setExclusive(False)
         self.pre_btns: dict[str, QPushButton] = {}
-        for key, label in (("checkfold", tr("Passar/Desistir", "Check/Fold")), ("check", tr("Passar", "Check")),
-                           ("callany", tr("Pagar qualquer", "Call any"))):
+        for key, label in (("checkfold", tr("Passar/Desistir (F)", "Check/Fold (F)")),
+                           ("check", tr("Passar (C)", "Check (C)")),
+                           ("callany", tr("Pagar qualquer (A)", "Call any (A)"))):
             b = self._chip(label, lambda _=False, k=key: self._set_preaction(k), "", checkable=True)
             self.pre_group.addButton(b)
             self.pre_btns[key] = b
@@ -524,11 +588,51 @@ class PlayPage(QWidget):
         pl.addStretch(1)
         btns.addWidget(self.pre_box, 1)
         pv.addLayout(btns)
-        root.addWidget(self.panel)
+        # barra de ações centralizada, com largura máxima
+        self.panel.setMaximumWidth(MAX_PANEL_W)
+        prow = QHBoxLayout()
+        prow.setContentsMargins(0, 0, 0, 0)
+        prow.addStretch(1)
+        prow.addWidget(self.panel, 1000)
+        prow.addStretch(1)
+        root.addLayout(prow)
         # altura fixa: a mesa não muda de tamanho quando os botões aparecem/somem
-        self.panel.setFixedHeight(132)
+        self.panel.setFixedHeight(136)
         self._update_speed_btn()
+        # o teclado fica com a página (Espaço = próxima mão, F/C/R, P, S): botões não roubam o foco
+        self.setFocusPolicy(Qt.StrongFocus)
+        for b in self.findChildren(QPushButton):
+            b.setFocusPolicy(Qt.NoFocus)
+        self.menu_btn.setChecked(S.get("play_sidebar"))
+        self.log_btn.setChecked(S.get("play_log"))
+        self.log_panel.setVisible(S.get("play_log"))
         self._set_mode("wait")
+
+    # ------------------------------------------------------------ painéis recolhíveis
+    def _felt_label(self) -> str:
+        return tr("TORNEIO", "TOURNAMENT") if self.tournament else "CASH GAME"
+
+    def _hide_bubbles(self) -> None:
+        for b in self.bubbles:
+            b.hide()
+
+    def toggle_bb(self) -> None:
+        S.put("show_bb", self.bb_btn.isChecked())
+        self._refresh(final=self.table is not None and self.table.hand_over)
+        if self.table is not None and self.table.to_act == 0 and not self.table.hand_over and not self._queue:
+            self._hero_turn()
+
+    def set_log_visible(self, on: bool) -> None:
+        self._hide_bubbles()   # a mesa muda de lugar: balões antigos ficariam soltos
+        S.put("play_log", on)
+        self.log_btn.setChecked(on)
+        self.log_panel.setVisible(on)
+
+    def set_sidebar_visible(self, on: bool) -> None:
+        self._hide_bubbles()
+        S.put("play_sidebar", on)
+        self.menu_btn.setChecked(on)
+        self.sidebarToggled.emit(on)
 
     def _chip(self, text: str, slot, tip: str, checkable: bool = False) -> QPushButton:
         b = QPushButton(text)
@@ -545,23 +649,30 @@ class PlayPage(QWidget):
         return {"hands": 0, "won": 0, "good": 0, "decisions": 0, "rebuys": 0, "biggest": 0}
 
     # ------------------------------------------------------------ sessão
-    def new_session(self, tournament: bool | None = None) -> None:
-        """Nova partida: cash game ou torneio (None = o mesmo tipo da partida anterior)."""
+    def new_session(self, tournament: bool | None = None, difficulty: str | None = None) -> None:
+        """Nova partida: cash game ou torneio (None = o mesmo tipo da partida anterior).
+
+        O torneio usa a dificuldade escolhida no lobby (`difficulty`; None = a do torneio anterior); o cash game
+        usa a das Configurações.
+        """
         self.stop()
         if tournament is not None:
             self.tournament = tournament
-        diff = S.get("difficulty")
+        if difficulty is not None:
+            self.tourn_diff = difficulty
+        diff = (getattr(self, "tourn_diff", None) or S.get("difficulty")) if self.tournament else S.get("difficulty")
         self._update_players_btn()
         hero = T.Player(name=tr("Você", "You"), stack=START_STACK, is_hero=True, avatar="⭐")
         self.session = self._new_session_dict()
         self.session["diff"] = diff
-        self.area.set_felt(self.tournament)
+        self.area.set_felt(True, self._felt_label())
         self.game_over = False
         self.paused = False
         self.pause_btn.setText(tr("⏸ Pausar", "⏸ Pause"))
         self.log_lines = []
         S.add_play_totals({"sessions": 1, "tournaments": int(self.tournament)})
         if self.tournament:
+            S.add_tourn_result(diff, played=1)
             n = ai.tournament_rounds(diff)
             self.session.update(round=0, rounds=n, round_hands=0, round_done=False, field=0)
             self._log(tr(f"<b>Novo torneio</b> — {n} rodadas, dificuldade {ai.difficulty_name(diff)}.",
@@ -574,44 +685,72 @@ class PlayPage(QWidget):
                      f"{START_STACK} chips each."))
         self.next_hand()
 
-    def _seat_table(self, hero: T.Player) -> None:
-        """Mesa nova com o jogador e bots novos, todos com o stack inicial."""
+    def _seat_table(self, hero: T.Player, carry: bool = False) -> None:
+        """Mesa nova com o jogador e bots novos. No torneio, a partir da 2ª rodada (`carry`), você leva as suas
+        fichas e os adversários (outros classificados) chegam com stacks em torno da média da fase."""
         n_opp = max(1, min(S.MAX_OPPONENTS, S.get("play_opponents")))
-        hero.stack, hero.sitting_out = START_STACK, False
+        if not carry:
+            hero.stack = START_STACK
+        hero.sitting_out = False
+        avg = START_STACK * 2 ** (self.session.get("round", 1) - 1) if carry else START_STACK
         taken: set[str] = set()
         bots = []
         for _ in range(n_opp):
-            b = ai.new_bot_player(self.session.get("diff", S.get("difficulty")), START_STACK, self.rng, taken)
+            stack = int(round(avg * self.rng.uniform(0.45, 1.75) / 5)) * 5 if carry else START_STACK
+            b = ai.new_bot_player(self.session.get("diff", S.get("difficulty")), max(5 * BB, stack), self.rng,
+                                  taken)
             taken.add(b.name)
             bots.append(b)
         self.table = T.Table([hero] + bots, SB, BB, self.rng)
+        if self.tournament:
+            sb, bb, ante, _left = ai.blinds_for(self.session.get("hands", 0))
+            self.table.sb, self.table.bb, self.table.ante = sb, bb, ante
         self._build_seats()
+
+    def _update_bubble(self) -> None:
+        """Bolha: falta uma eliminação para fechar a rodada (quem cair agora não passa)."""
+        t = self.table
+        if not self.tournament or self.final_table or t is None:
+            if t is not None:
+                t.bubble = False
+            return
+        alive = sum(1 for p in t.players if p.stack > 0)
+        t.bubble = alive == ai.round_qualifiers(len(t.players), False) + 1
+        if t.bubble and not self.session.get("bubble_said"):
+            self.session["bubble_said"] = True
+            self._log(tr("🫧 <b>Bolha!</b> A próxima eliminação fecha a rodada. Sobreviver agora vale mais que fichas: "
+                         "pague só com folga; com stack grande, pressione os médios e curtos.",
+                         "🫧 <b>Bubble!</b> The next knockout ends the round. Surviving is worth more than chips now: "
+                         "call only with a margin; with a big stack, pressure the medium and short stacks."))
 
     @property
     def final_table(self) -> bool:
         return self.tournament and self.session.get("round") == self.session.get("rounds")
 
     def _start_round(self, hero: T.Player | None = None) -> None:
-        """Próxima rodada do torneio: mesa nova, stacks e blinds do começo."""
+        """Próxima rodada do torneio: mesa nova; você leva as fichas e o relógio dos blinds continua."""
         self.stop()
         ss = self.session
         ss["round"] += 1
         ss["round_hands"] = 0
         ss["round_done"] = False
-        self._seat_table(hero or self.hero)
+        ss["bubble_said"] = False
+        self._seat_table(hero or self.hero, carry=ss["round"] > 1)
         n = len(self.table.players)
         if not ss["field"]:
             ss["field"] = n * 2 ** (ss["rounds"] - 1)   # jogadores no torneio (metade passa a cada rodada)
+        stacks = tr(f"você leva {self.hero.stack} fichas", f"you carry {self.hero.stack} chips") \
+            if ss["round"] > 1 else tr(f"{START_STACK} fichas cada", f"{START_STACK} chips each")
         if self.final_table:
             self._log(tr(f"<hr>🏆 <b>Mesa final</b> (rodada {ss['round']} de {ss['rounds']}) — {n} jogadores, "
-                         f"{START_STACK} fichas cada. Só o campeão sai daqui.",
+                         f"{stacks}. Só o campeão sai daqui.",
                          f"<hr>🏆 <b>Final table</b> (round {ss['round']} of {ss['rounds']}) — {n} players, "
-                         f"{START_STACK} chips each. Only the champion leaves."))
+                         f"{stacks}. Only the champion leaves."))
         else:
             q = ai.round_qualifiers(n, False)
-            self._log(tr(f"<hr>🎟 <b>Rodada {ss['round']} de {ss['rounds']}</b> — mesa nova, {START_STACK} fichas "
-                         f"cada. Passam {q} de {n} jogadores.",
-                         f"<hr>🎟 <b>Round {ss['round']} of {ss['rounds']}</b> — new table, {START_STACK} chips each. "
+            self._log(tr(f"<hr>🎟 <b>Rodada {ss['round']} de {ss['rounds']}</b> — mesa nova, {stacks}. "
+                         f"Passam {q} de {n} jogadores.",
+                         f"<hr>🎟 <b>Round {ss['round']} of {ss['rounds']}</b> — new table, {stacks}. "
                          f"{q} of {n} players advance."))
         self.next_hand()
 
@@ -623,7 +762,7 @@ class PlayPage(QWidget):
         """Continua uma partida existente (ex.: depois de trocar o idioma)."""
         self.table, self.log_lines, self.session = st["table"], st["log"], st["session"]
         self.tournament, self.game_over = st["tournament"], st["game_over"]
-        self.area.set_felt(self.tournament)
+        self.area.set_felt(True, self._felt_label())
         self._snap = st.get("snap")
         t = self.table
         t.players[0].name = tr("Você", "You")
@@ -689,7 +828,10 @@ class PlayPage(QWidget):
     def _next_clicked(self) -> None:
         self.auto_timer.stop()
         if self.game_over:
-            self.new_session()
+            if self.tournament:
+                self.lobbyRequested.emit()
+            else:
+                self.new_session()
         elif self.tournament and self.session.get("round_done"):
             self._start_round()
         else:
@@ -700,6 +842,7 @@ class PlayPage(QWidget):
         if t is None or self.game_over or (self.tournament and self.session.get("round_done")):
             return
         self.stop()
+        self._hide_bubbles()
         self.fast = False
         self.preaction = None
         for b in self.pre_btns.values():
@@ -720,10 +863,12 @@ class PlayPage(QWidget):
                     self._log(tr(f"{p.avatar} {p.name} quebrou e saiu; {nb.avatar} <b>{nb.name}</b> sentou-se.",
                                  f"{p.avatar} {p.name} went broke and left; {nb.avatar} <b>{nb.name}</b> sat down."))
         else:
-            sb, bb, _left = ai.blinds_for(self.session["round_hands"])
-            if (sb, bb) != (t.sb, t.bb):
-                self._log(tr(f"⏫ <b>Blinds sobem para {sb}/{bb}</b>", f"⏫ <b>Blinds go up to {sb}/{bb}</b>"))
-            t.sb, t.bb = sb, bb
+            sb, bb, ante, _left = ai.blinds_for(self.session["hands"])
+            if (sb, bb, ante) != (t.sb, t.bb, t.ante):
+                at = tr(f", ante {ante}", f", ante {ante}") if ante else ""
+                self._log(tr(f"⏫ <b>Blinds sobem para {sb}/{bb}{at}</b>", f"⏫ <b>Blinds go up to {sb}/{bb}{at}</b>"))
+            t.sb, t.bb, t.ante = sb, bb, ante
+            self._update_bubble()
         self._reasons = []
         self._eq_cache = None
         self._snap = PF.counters_of(self.hero)
@@ -736,7 +881,7 @@ class PlayPage(QWidget):
         self._log(f"<hr><b>{tr('Mão', 'Hand')} #{t.hand_no}</b> — {tr('botão', 'button')}: "
                   f"{t.players[t.dealer].name}")
         self.shown_board = 0
-        self.street_base = [0] * len(t.players)
+        self.street_base = [p.total - p.bet for p in t.players]   # a ante já está no pote
         self.hidden_win = {}
         self.paid = False
         self.tabled = set()
@@ -755,6 +900,8 @@ class PlayPage(QWidget):
         self.banner.setText(" ")
         self.floater.hide()
         sound.play("deal")
+        self._hh = self._new_recorder()
+        self._hh.feed(t.events)
         self._log_events(t.events)
         t.events = []
         self._refresh()
@@ -821,6 +968,7 @@ class PlayPage(QWidget):
         self._dots = (self._dots + 1) % 4
         if self.thinking is not None and self.thinking > 0:
             self.seats[self.thinking - 1].action.setText(tr("pensando", "thinking") + "." * self._dots)
+            self.seats[self.thinking - 1].action.set_color(DEFAULT_ACTION_COLOR)
 
     # ------------------------------------------------------------ jogador
     def _apply_preaction(self) -> bool:
@@ -845,6 +993,16 @@ class PlayPage(QWidget):
         for b in self.pre_btns.values():
             b.setChecked(False)
 
+    PRE_KEYS = {Qt.Key_F: "checkfold", Qt.Key_C: "check", Qt.Key_A: "callany"}
+
+    def _toggle_preaction_key(self, key: str) -> None:
+        """Atalho de teclado: marca (ou desmarca) a pré-ação, como clicar no botão."""
+        b = self.pre_btns[key]
+        if not b.isVisible() or not b.isEnabled():
+            return
+        b.setChecked(not b.isChecked())
+        self._set_preaction(key)
+
     def _set_preaction(self, key: str) -> None:
         on = self.pre_btns[key].isChecked()
         for k, b in self.pre_btns.items():
@@ -864,19 +1022,24 @@ class PlayPage(QWidget):
             self.prompt.setText(tr("Sua vez: passar ou apostar?", "Your turn: check or bet?"))
         else:
             allin = lg.to_call >= self.hero.stack
-            self.call_btn.setText(tr(f"Pagar ALL-IN {lg.to_call}", f"Call ALL-IN {lg.to_call}") if allin
-                                  else tr(f"Pagar {lg.to_call} (C)", f"Call {lg.to_call} (C)"))
+            amt = fmt_amount(lg.to_call)
+            self.call_btn.setText(tr(f"Pagar ALL-IN {amt}", f"Call ALL-IN {amt}") if allin
+                                  else tr(f"Pagar {amt} (C)", f"Call {amt} (C)"))
             need = lg.to_call / (pot + lg.to_call)
-            self.prompt.setText(tr(f"Sua vez: pagar {lg.to_call} para um pote de {pot + lg.to_call}?",
-                                   f"Your turn: call {lg.to_call} into a pot of {pot + lg.to_call}?"))
+            self.prompt.setText(tr(f"Sua vez: pagar {fmt_amount(lg.to_call)} para um pote de "
+                                   f"{fmt_amount(pot + lg.to_call)}?",
+                                   f"Your turn: call {fmt_amount(lg.to_call)} into a pot of "
+                                   f"{fmt_amount(pot + lg.to_call)}?"))
         hint = [tr(f"Posição: {t.position_of(0)}.", f"Position: {t.position_of(0)}.")]
         if not lg.can_check:
             hint.append(tr(f"Pot odds: precisa vencer {need:.0%} das vezes para pagar.",
                            f"Pot odds: you need to win {need:.0%} of the time to call."))
         if S.get("play_assist"):
             eq = self._hero_equity()
-            hint.append(tr(f"Assistente: sua chance ~{eq:.0%} contra mãos aleatórias.",
-                           f"Assistant: your chance ~{eq:.0%} vs random hands."))
+            hint.append(tr(f"Assistente: sua chance ~{eq:.0%} contra as mãos com que eles jogariam assim.",
+                           f"Assistant: your chance ~{eq:.0%} vs the hands they'd play this way."))
+        if self._icm_margin():
+            hint.append(tr("Bolha: pague só com folga.", "Bubble: call only with a margin."))
         self.hint.setText("  ".join(hint))
         self.fold_btn.setEnabled(not lg.can_check)
         can_raise = lg.can_raise
@@ -894,7 +1057,7 @@ class PlayPage(QWidget):
             self._update_raise_text()
         else:
             self.raise_btn.setText(tr("Aumentar", "Raise"))
-        self.call_btn.setFocus()
+        self.setFocus()
 
     def _pot_size(self, frac: float) -> int:
         t = self.table
@@ -926,19 +1089,27 @@ class PlayPage(QWidget):
             return
         v = self.amount.value()
         if v >= t.legal(0).max_raise_to:
-            self.raise_btn.setText(f"ALL-IN {v} (R)")
+            self.raise_btn.setText(f"ALL-IN {fmt_amount(v)} (R)")
         elif t.current_bet == 0:
-            self.raise_btn.setText(tr(f"Apostar {v} (R)", f"Bet {v} (R)"))
+            self.raise_btn.setText(tr(f"Apostar {fmt_amount(v)} (R)", f"Bet {fmt_amount(v)} (R)"))
         else:
-            self.raise_btn.setText(tr(f"Aumentar p/ {v} (R)", f"Raise to {v} (R)"))
+            self.raise_btn.setText(tr(f"Aumentar p/ {fmt_amount(v)} (R)", f"Raise to {fmt_amount(v)} (R)"))
 
     def _hero_equity(self) -> float:
+        """Sua chance contra as mãos com que cada oponente jogaria do jeito que jogou nesta mão."""
         t = self.table
         n_opp = max(1, len(t.seats_in_hand()) - 1)
-        key = (t.hand_no, len(t.board), n_opp)
+        key = (t.hand_no, len(t.board), n_opp, t.current_bet, tuple(p.last_action for p in t.players))
         if self._eq_cache is None or self._eq_cache[0] != key:
-            self._eq_cache = (key, E.equity(self.hero.hole, t.board, n_opp, 4000, self.rng).equity)
+            ranges = RG.table_ranges(t, 0)
+            self._eq_cache = (key, E.equity(self.hero.hole, t.board, n_opp, 4000, self.rng,
+                                            opp_ranges=ranges).equity)
         return self._eq_cache[1]
+
+    def _icm_margin(self) -> float:
+        """Na bolha do torneio, pagar exige uma folga a mais (cair agora custa a vaga)."""
+        t = self.table
+        return 0.08 if self.tournament and getattr(t, "bubble", False) else 0.0
 
     def hero_act(self, kind: str) -> None:
         t = self.table
@@ -964,18 +1135,21 @@ class PlayPage(QWidget):
         t = self.table
         eq = self._hero_equity()
         need = lg.to_call / (t.pot + lg.to_call)
+        icm = self._icm_margin()
         self.session["decisions"] += 1
-        if kind == "call" and eq < need - 0.06:
-            msg = tr(f"Você pagou precisando de {need:.0%} com ~{eq:.0%} de chance: caro demais (e quem aposta "
-                     f"costuma ter mão melhor).",
-                     f"You called needing {need:.0%} with ~{eq:.0%} chance: too expensive (and bettors usually "
-                     f"have better).")
+        icm_txt = tr(" (na bolha, com folga para o risco de cair)", " (on the bubble, with a margin for the risk "
+                     "of busting)") if icm else ""
+        if kind == "call" and eq < need + icm - 0.04:
+            msg = tr(f"Você pagou precisando de {need + icm:.0%}{icm_txt} com ~{eq:.0%} de chance contra as mãos com "
+                     f"que ele apostaria: caro demais.",
+                     f"You called needing {need + icm:.0%}{icm_txt} with ~{eq:.0%} against the hands they'd bet "
+                     "with: too expensive.")
             ok = False
-        elif kind == "fold" and eq > need + 0.14:
-            msg = tr(f"Você desistiu com ~{eq:.0%} de chance precisando só de {need:.0%}: pagar seria lucrativo "
-                     f"contra a maioria das mãos.",
-                     f"You folded with ~{eq:.0%} chance needing only {need:.0%}: calling would be profitable "
-                     f"against most hands.")
+        elif kind == "fold" and eq > need + icm + 0.08:
+            msg = tr(f"Você desistiu com ~{eq:.0%} de chance contra a faixa dele precisando só de {need + icm:.0%}: "
+                     "pagar seria lucrativo.",
+                     f"You folded with ~{eq:.0%} against their range needing only {need + icm:.0%}: calling would "
+                     "be profitable.")
             ok = False
         else:
             act = tr("pagar", "calling") if kind == "call" else tr("desistir", "folding")
@@ -991,6 +1165,8 @@ class PlayPage(QWidget):
     def _after_act(self, seat: int, d, lg: T.Legal) -> None:
         t = self.table
         evs, t.events = t.events, []
+        if getattr(self, "_hh", None) is not None:
+            self._hh.feed(evs)
         if not self.fast:
             la = t.players[seat].last_action
             sound.play({"fold": "fold", "check": "check", "call": "call", "bet": "bet", "raise": "bet",
@@ -1119,12 +1295,17 @@ class PlayPage(QWidget):
         self._clear_preaction()
         self._refresh()
 
+    def _shows(self, i: int) -> bool:
+        """Essas cartas aparecem no showdown? Quem perde descarta (a não ser no modo aprendizado)."""
+        t = self.table
+        return i == 0 or i in t.shown or S.get("show_mucked") or i in self.tabled
+
     def _showdown_step(self) -> None:
         t = self.table
         anim = S.get("animations") and not self.fast
         delay = 0
         for i in t.showdown_hands:
-            if i == 0 or i in self.tabled:
+            if i == 0 or i in self.tabled or not self._shows(i):
                 continue
             self.tabled.add(i)
             for c in self.seats[i - 1].cards:
@@ -1144,8 +1325,14 @@ class PlayPage(QWidget):
             for c, card in zip(sw.cards, t.players[i].hole):
                 c.set_highlight(i in winners and card in five)
                 c.set_dimmed(i not in winners)
-            if i:
+            if i and not self._shows(i):
+                sw.action.setText(tr("descartou", "mucked"))
+                sw.action.set_color(ACTION_COLORS["fold"])
+                sw.action.setToolTip(tr("Perdeu e não mostrou as cartas.", "Lost and didn't show the cards."))
+                self._log(f"<span style='color:#9fb3ad'>{t.players[i].name} {tr('descartou a mão', 'mucked')}</span>")
+            elif i:
                 sw.action.setText(E.category_name(sc >> 20))
+                sw.action.set_color(DEFAULT_ACTION_COLOR)
                 sw.action.setToolTip(E.describe(sc))
         names = " & ".join(t.players[i].name for i in winners)
         self.banner.setText(f"<span style='color:#3ddc84; font-size:15px; font-weight:800'>🏆 {names} — "
@@ -1209,6 +1396,7 @@ class PlayPage(QWidget):
             self.session["won"] += won > 0
             self.session["biggest"] = max(self.session["biggest"], net)
             self._record_hand(won, net)
+            self._save_history()
             self._update_moods()
             if S.get("show_personality") and self._reasons:
                 for seat, street, reason in self._reasons:
@@ -1235,15 +1423,15 @@ class PlayPage(QWidget):
         else:
             extra = ""
             if self.tournament:
-                _sb, _bb, left = ai.blinds_for(ss["round_hands"] - 1)
+                _sb, _bb, _ante, left = ai.blinds_for(ss["hands"] - 1)
                 extra = tr(f"  Blinds sobem em {left} mão(s).", f"  Blinds go up in {left} hand(s).") if left else ""
                 need = 1 + len(alive) - qualify
                 if not self.final_table and need > 0:
                     extra += tr(f"  Falta{'m' if need > 1 else ''} {need} eliminaç{'ões' if need > 1 else 'ão'} "
                                 f"para passar de rodada.",
                                 f"  {need} more knockout{'s' if need > 1 else ''} to advance.")
-            self.hint.setText(tr("Enter para a próxima mão.", "Press Enter for the next hand.") + extra)
-            self.next_btn.setText(tr("Próxima mão  ▸", "Next hand  ▸"))
+            self.hint.setText(tr("Espaço ou Enter para a próxima mão.", "Press Space or Enter for the next hand.") + extra)
+            self.next_btn.setText(tr("Próxima mão (Espaço)  ▸", "Next hand (Space)  ▸"))
             if self.auto_btn.isChecked() and not replay and not self.paused:
                 self._countdown = 4
                 self._tick_auto()
@@ -1280,20 +1468,39 @@ class PlayPage(QWidget):
             self._log(f"<b>{msg}</b>")
             if place:
                 S.add_play_totals({"tourn_wins": int(place == 1), "best_place": place})
+                S.add_tourn_result(ss["diff"], place=place)
         hands = tr(f"{ss['hands']} mãos jogadas.", f"{ss['hands']} hands played.")
         if self.game_over:
             self.hint.setText(hands)
             self.next_btn.setText(tr("Novo torneio  ▸", "New tournament  ▸"))
         else:
-            self.hint.setText(tr(f"Rodada {r} concluída em {ss['round_hands']} mãos. A próxima mesa começa do zero, "
-                                 f"com {START_STACK} fichas.",
-                                 f"Round {r} done in {ss['round_hands']} hands. The next table starts fresh with "
-                                 f"{START_STACK} chips."))
+            self.hint.setText(tr(f"Rodada {r} concluída em {ss['round_hands']} mãos. Você leva as suas "
+                                 f"{self.hero.stack} fichas para a próxima mesa.",
+                                 f"Round {r} done in {ss['round_hands']} hands. You carry your {self.hero.stack} chips "
+                                 "to the next table."))
             self.next_btn.setText(tr("Mesa final  ▸", "Final table  ▸") if r + 1 == n else
                                   tr("Próxima rodada  ▸", "Next round  ▸"))
 
+    def _new_recorder(self) -> HH.Recorder:
+        t = self.table
+        level = ""
+        if self.tournament:
+            lvl = min(len(ai.BLIND_LEVELS) - 1, max(0, self.session["hands"] - 1) // ai.HANDS_PER_LEVEL) + 1
+            level = str(lvl)
+        hand_id = int(time.time() * 1000) % 10 ** 12
+        return HH.Recorder(t, hand_id, "Pro Poker Trainer", self.tournament, level)
+
+    def _save_history(self) -> None:
+        if getattr(self, "_hh", None) is None:
+            return
+        try:
+            HH.append(self._hh.finish())
+        except OSError:
+            pass
+        self._hh = None
+
     def _record_hand(self, won: int, net: int) -> None:
-        """Soma esta mão às estatísticas acumuladas do jogador (aba Jogo simulado em Estatísticas)."""
+        """Soma esta mão às estatísticas acumuladas do jogador (aba Cash game e torneio em Estatísticas)."""
         if self._snap is None or not self.hero.hole:
             return
         now = PF.counters_of(self.hero)
@@ -1369,7 +1576,7 @@ class PlayPage(QWidget):
             self.auto_timer.stop()
             self.next_hand()
             return
-        self.next_btn.setText(tr(f"Próxima mão ({self._countdown})  ▸", f"Next hand ({self._countdown})  ▸"))
+        self.next_btn.setText(tr(f"Próxima mão em {self._countdown} (Espaço)  ▸", f"Next hand in {self._countdown} (Space)  ▸"))
         self._countdown -= 1
 
     # ------------------------------------------------------------ controles de ritmo
@@ -1430,7 +1637,7 @@ class PlayPage(QWidget):
         if not self.auto_btn.isChecked():
             self.auto_timer.stop()
             if self.table is not None and self.table.hand_over and not self.game_over:
-                self.next_btn.setText(tr("Próxima mão  ▸", "Next hand  ▸"))
+                self.next_btn.setText(tr("Próxima mão (Espaço)  ▸", "Next hand (Space)  ▸"))
 
     def skip_hand(self) -> None:
         """Você já saiu da mão: termina na hora, sem esperar os bots."""
@@ -1455,7 +1662,7 @@ class PlayPage(QWidget):
         self.next_btn.setVisible(mode == "end")
         self.next_btn.setEnabled(mode == "end")
         if mode == "end":
-            self.next_btn.setFocus()
+            self.setFocus()
         t = self.table
         if t is None:
             self.skip_btn.hide()
@@ -1497,6 +1704,7 @@ class PlayPage(QWidget):
         t = self.table
         if t is None:
             return
+        _BB_UNIT["bb"] = t.bb if S.get("show_bb") else 0
         show_pers = S.get("show_personality")
         for i, p in enumerate(t.players):
             sw = self._seat_widget(i)
@@ -1507,17 +1715,19 @@ class PlayPage(QWidget):
             pos = t.position_of(i)
             sw.badge.setText("D" if pos == "BTN" else pos if pos in ("SB", "BB") else "")
             sw.badge.setVisible(sw.badge.text() != "")
-            sw.stack.setText("" if out else f"💰 {p.stack - self.hidden_win.get(i, 0)}")
+            sw.stack.setText("" if out else f"💰 {fmt_amount(p.stack - self.hidden_win.get(i, 0))}")
             if out:
                 sw.action.setText(tr("eliminado", "eliminated") if self.tournament else tr("fora", "out"))
-            elif i == self.thinking or (final and i in t.showdown_hands and i in self.tabled):
-                pass
+                sw.action.set_color(FADED)
+            elif i == self.thinking or (final and i in t.showdown_hands and (i in self.tabled or not self._shows(i))):
+                sw.action.set_color(DEFAULT_ACTION_COLOR)
             else:
                 la = p.last_action
                 amt = p.total - self.street_base[i] if self.street_base else p.bet
                 if la in ("call", "bet", "raise", "allin") and amt <= 0:
                     amt = p.total
                 sw.action.setText(action_text(la, amt) if la and not la.startswith(("SB", "BB")) else la)
+                sw.action.set_color(action_color(la))
             sw.set_state(active=(t.to_act == i and not t.hand_over and not self._queue), folded=p.folded, out=out,
                          winner=final and i in self.winner_seats)
             if i:
@@ -1550,7 +1760,9 @@ class PlayPage(QWidget):
         elif not final:
             self.hand_name.setText(" ")
         info = [f"{tr('MÃO', 'HAND')} #{t.hand_no}", street_name(self._shown_street()).upper(),
-                f"BLINDS {t.sb}/{t.bb}"]
+                f"BLINDS {t.sb}/{t.bb}" + (f" · ANTE {t.ante}" if t.ante else "")]
+        if self.tournament and getattr(t, "bubble", False):
+            info.append(tr("BOLHA", "BUBBLE"))
         if self.tournament:
             info.append(tr("MESA FINAL", "FINAL TABLE") if self.final_table else
                         tr(f"RODADA {self.session['round']}/{self.session['rounds']}",
@@ -1656,6 +1868,8 @@ class PlayPage(QWidget):
         name_h = 26
         top = info_h + 2
         cx, cy = w / 2, (top + h - name_h) / 2
+        # largura útil da mesa: limitada, e proporcional à altura (mesa oval, não uma faixa comprida)
+        half = min(w, MAX_TABLE_W, max(720.0, h * 1.9)) / 2
         span = 280 if n >= 6 else 250 if n >= 5 else 200
         hero_rect = QRect(int(cx - self.hero_seat.width() / 2), int(h - hero_h - name_h),
                           self.hero_seat.width(), hero_h)
@@ -1665,7 +1879,7 @@ class PlayPage(QWidget):
                 s.set_card_height(card_h)
             seat_h = max(s.sizeHint().height() for s in self.seats)
             seat_w = max(s.width() for s in self.seats)
-            rx = max(10.0, w / 2 - seat_w / 2 - 2)
+            rx = max(10.0, half - seat_w / 2 - 2)
             ry = max(10.0, (h - name_h - top) / 2 - seat_h / 2)
             rects = []
             for i, s in enumerate(self.seats):
@@ -1698,17 +1912,21 @@ class PlayPage(QWidget):
             s.setGeometry(r)
         seat_w = max(s.width() for s in self.seats)
         self.hero_seat.setGeometry(hero_rect)
-        # mesa de feltro (torneio): a borda passa por baixo do meio dos assentos
+        # mesa de feltro: a borda passa por baixo do meio dos assentos, com proporção fixa (não estica)
         seat_h = max(s.height() for s in self.seats)
-        t_top = min(r.top() for r in rects) + seat_h * 0.5
-        t_bot = hero_rect.top() + min(60, hero_h * 0.4)
-        t_left, t_right = seat_w * 0.45, w - seat_w * 0.45
+        t_top = min(r.top() for r in rects) + seat_h * 0.5 - TABLE_EXTRA_H / 2
+        t_bot = hero_rect.top() + min(60, hero_h * 0.4) + TABLE_EXTRA_H / 2
+        t_h = max(0.0, t_bot - t_top)
+        max_w = 2 * (half - seat_w * 0.45)
         if n <= 2:   # poucos assentos: mesa não tão comprida
-            t_left, t_right = max(t_left, w * 0.12), min(t_right, w * 0.88)
-        self.area.set_table_rect(QRectF(t_left, t_top, max(0, t_right - t_left), max(0, t_bot - t_top)))
+            max_w = min(max_w, 2 * half * 0.76)
+        t_w = min(max_w, t_h * TABLE_RATIO)
+        t_h = min(t_h, t_w / TABLE_RATIO) + TABLE_PAD_H
+        t_cy = (t_top + t_bot) / 2
+        self.area.set_table_rect(QRectF(cx - t_w / 2, t_cy - t_h / 2, t_w, t_h))
         self.hand_name.setGeometry(0, h - name_h, w, name_h)
         # cartas comunitárias no centro
-        free_w = w - 2 * seat_w - 20 if n >= 3 else w - 40
+        free_w = 2 * half - 2 * seat_w - 20 if n >= 3 else 2 * half - 40
         board_h = int(max(46, min(h * 0.15, (free_w / 5 - 6) * CARD_RATIO * 0.88, 130)))
         for c in self.board_cards:
             c.set_card_height(board_h)
@@ -1753,8 +1971,19 @@ class PlayPage(QWidget):
         if k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.next_btn.isVisible():
             self._next_clicked()
             return
+        if k == Qt.Key_S:
+            # S: com a mão encerrada vai para a próxima; se você já saiu, pula o resto da jogada dos bots
+            if self.next_btn.isVisible():
+                self._next_clicked()
+            elif self.skip_btn.isVisible():
+                self.skip_hand()
+            return
         if k == Qt.Key_P:
             self.toggle_pause()
+            return
+        if k in self.PRE_KEYS and self.pre_box.isVisible():
+            # enquanto os outros jogam, F/C/A marcam as pré-ações
+            self._toggle_preaction_key(self.PRE_KEYS[k])
             return
         if self.table is not None and self.table.to_act == 0 and not self.table.hand_over and not self._queue:
             if k == Qt.Key_F:

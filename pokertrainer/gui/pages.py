@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget,
-    QTextBrowser, QToolTip, QVBoxLayout, QWidget,
+    QMessageBox, QTextBrowser, QToolTip, QVBoxLayout, QWidget,
 )
 
 from pokertrainer import ai
@@ -19,8 +19,18 @@ from pokertrainer.gui.play_page import speed_names as play_speeds
 from pokertrainer.gui.widgets import CardWidget, Glass
 
 
-def _page_shell(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
-    """Página com painel translúcido; devolve (página, layout interno)."""
+def close_button(on_close) -> QPushButton:
+    """Botão "Fechar" no canto das páginas de apoio: volta para onde você estava (Esc também)."""
+    b = QPushButton(tr("✕  Fechar", "✕  Close"))
+    b.setObjectName("chip")
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip(tr("Voltar (Esc)", "Go back (Esc)"))
+    b.clicked.connect(on_close)
+    return b
+
+
+def _page_shell(title: str, subtitle: str = "", on_close=None) -> tuple[QWidget, QVBoxLayout]:
+    """Página com painel translúcido; devolve (página, layout interno). `on_close` põe um botão Fechar no título."""
     page = QWidget()
     outer = QVBoxLayout(page)
     outer.setContentsMargins(24, 20, 24, 20)
@@ -29,9 +39,15 @@ def _page_shell(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
     v = QVBoxLayout(panel)
     v.setContentsMargins(28, 22, 28, 22)
     v.setSpacing(10)
+    head = QHBoxLayout()
     t = QLabel(title)
     t.setObjectName("pageTitle")
-    v.addWidget(t)
+    head.addWidget(t)
+    head.addStretch(1)
+    if on_close is not None:
+        page.close_btn = close_button(on_close)
+        head.addWidget(page.close_btn, 0, Qt.AlignTop)
+    v.addLayout(head)
     if subtitle:
         s = QLabel(subtitle)
         s.setObjectName("muted")
@@ -43,23 +59,26 @@ def _page_shell(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
 # ---------------------------------------------------------------- início
 
 class HomePage(QWidget):
+    """Tela inicial: o que o app faz; os modos ficam no menu lateral."""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         v = QVBoxLayout(self)
+        v.setContentsMargins(40, 20, 40, 40)
         v.addStretch(1)
-        t = QLabel(tr("Quanto vale a sua mão?", "How much is your hand worth?"))
+        t = QLabel(tr("Bem-vindo ao Pro Poker Trainer", "Welcome to Pro Poker Trainer"))
         t.setAlignment(Qt.AlignCenter)
         t.setStyleSheet("font-size: 34px; font-weight: 800; color: white;")
         v.addWidget(t)
-        s = QLabel(tr("Escolha um modo no menu à esquerda. Você vê suas cartas (e parte da mesa), arrasta a barra "
-                      "para o seu palpite e descobre a probabilidade real de vencer — com explicação.",
-                      "Pick a mode in the menu on the left. You see your cards (and part of the board), drag the "
-                      "bar to your guess and find out the actual probability of winning — with an explanation."))
+        s = QLabel(tr("Pratique contra bots fortes que se adaptam ao seu estilo de jogo, ou treine mãos individuais "
+                      "com a matemática por trás de cada decisão. Escolha um modo no menu à esquerda.",
+                      "Practice against strong bots that adapt to your playing style, or train individual hands "
+                      "with the math behind every decision. Pick a mode in the menu on the left."))
         s.setAlignment(Qt.AlignCenter)
         s.setWordWrap(True)
         s.setObjectName("muted")
         s.setStyleSheet("font-size: 15px;")
-        s.setMaximumWidth(620)
+        s.setMaximumWidth(640)
         h = QHBoxLayout()
         h.addStretch(1)
         h.addWidget(s)
@@ -189,9 +208,11 @@ def _table(headers: list[str], rows: list[list[str]], stretch_first: bool = True
 
 
 class TablePage(QWidget):
+    closeRequested = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        page, v = _page_shell(tr("Tabela de probabilidades", "Probability charts"))
+        page, v = _page_shell(tr("Tabela de probabilidades", "Probability charts"), on_close=self.closeRequested.emit)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(page)
@@ -357,127 +378,161 @@ p, li { color: #dfe8e5; line-height: 150%; }
 """
 
 TIPS_HTML_PT = """
-<h3>1. O que é “chance de vencer”?</h3>
-<p>É a <span class='k'>equidade</span>: a fração do pote que a sua mão ganha, em média, se todos forem até o
-river. Vitórias valem 100%, empates dividem o pote (meio pote contra 1 oponente). O app calcula isso
-simulando dezenas de milhares de mesas aleatórias (Monte Carlo).</p>
+<h3>1. Decida em três passos</h3>
+<ol>
+<li><span class='k'>Estime sua chance</span> (equidade) contra as <span class='k'>mãos com que o oponente jogaria
+assim</span>: ninguém aumenta ou aposta com qualquer mão. Antes do flop, a posição define a faixa (do UTG ~14% das mãos,
+do botão ~40%).</li>
+<li><span class='k'>Compare com o preço</span> (pot odds): se alguém apostou, pagar só vale se sua chance for maior
+que o preço.</li>
+<li><span class='k'>Veja se é forte o bastante para apostar</span>: mãos bem acima da média ganham mais apostando ou
+aumentando do que só passando ou pagando.</li>
+</ol>
 
-<h3>2. Comece pela fatia justa</h3>
-<p>Com <i>n</i> jogadores, uma mão média tem <span class='k'>100% ÷ n</span>: 50% contra 1 oponente, 33% contra 2,
-25% contra 3. Pergunte-se: minha mão está acima ou abaixo da média? Depois ajuste.</p>
+<h3>2. Pot odds: o preço de pagar</h3>
+<p>Preço = <span class='k'>aposta ÷ pote final</span> (o pote depois que você paga). Contra 1 oponente:</p>
+<ul>
+<li>Aposta de ⅓ do pote → precisa de <span class='k'>20%</span> · ½ pote → <span class='k'>25%</span> ·
+⅔ do pote → <span class='k'>29%</span> · pote inteiro → <span class='k'>33%</span>.</li>
+<li>Quando outros jogadores já pagaram, o pote final cresce e o preço cai — mas há mais mãos para vencer.</li>
+<li>O valor esperado de pagar é <span class='k'>chance × pote final − aposta</span>. Desistir vale zero.</li>
+</ul>
 
-<h3>3. Referências pré-flop (contra 1 oponente)</h3>
+<h3>3. Aposta por valor</h3>
+<p>Aposte (ou aumente) por valor quando estiver <span class='k'>à frente das mãos que pagam</span> — mais de 50% contra
+elas. Não basta estar à frente da faixa inteira: quem paga uma aposta costuma ter mão melhor do que quem desiste. Com
+mão muito forte, aposte grande (⅔ do pote ou mais); com valor fino (par alto), ⅓ a ⅔ do pote.</p>
+
+<h3>4. Semiblefe</h3>
+<p>No flop e no turn, projetos fortes (<span class='k'>8 ou mais outs</span>, como flush draw ou sequência aberta)
+podem apostar mesmo sem mão feita: às vezes ganham o pote na hora e, se pagarem, ainda podem completar.</p>
+
+<h3>5. Passar não custa nada</h3>
+<p>Se ninguém apostou, nunca desista: passar é de graça e você vê a próxima carta.</p>
+
+<h3>6. Referências pré-flop (contra 1 oponente)</h3>
 <ul>
 <li><span class='k'>AA</span> ≈ 85% · <span class='k'>KK</span> ≈ 82% · <span class='k'>QQ</span> ≈ 80% · <span class='k'>JJ</span> ≈ 77%</li>
 <li><span class='k'>AKs</span> ≈ 67% · <span class='k'>AKo</span> ≈ 65% · <span class='k'>AQo</span> ≈ 64%</li>
 <li><span class='k'>22</span> ≈ 50% — até o menor par é levemente favorito contra uma mão aleatória.</li>
-<li>Pior mão: <span class='k'>32o</span> ≈ 32%. Mesmo o lixo ganha quase 1 em cada 3 vezes!</li>
-<li>Mesmo naipe acrescenta só ~2–4 pontos; cartas conectadas, ~1–2.</li>
+<li>Pior mão: <span class='k'>32o</span> ≈ 32%. Mesmo naipe acrescenta só ~2–4 pontos; cartas conectadas, ~1–2.</li>
 </ul>
 
-<h3>4. Mais oponentes, menos chance</h3>
-<p>AA cai de ~85% (1 oponente) para ~73% (2), ~64% (3) e ~56% (4). Mãos especulativas (pares baixos,
-conectores do mesmo naipe) perdem menos valor relativo, porque quando acertam costumam ganhar potes grandes.</p>
+<h3>7. Mais oponentes, menos chance</h3>
+<p>AA cai de ~85% (1 oponente) para ~73% (2), ~64% (3) e ~56% (4). Mãos especulativas (pares baixos, conectores do
+mesmo naipe) perdem menos valor relativo, porque quando acertam costumam ganhar potes grandes.</p>
 
-<h3>5. Depois do flop: conte os outs</h3>
-<p><span class='k'>Outs</span> são cartas que melhoram sua mão. Regra prática:</p>
+<h3>8. Depois do flop: conte os outs</h3>
 <ul>
 <li>No <span class='k'>flop</span> (2 cartas a vir): outs × 4 ≈ % de acertar até o river.</li>
 <li>No <span class='k'>turn</span> (1 carta a vir): outs × 2 ≈ % de acertar no river.</li>
 <li>Flush draw = 9 outs (~35% do flop) · sequência aberta = 8 (~31%) · gutshot = 4 (~16%).</li>
 </ul>
-<p>Mas cuidado: acertar um out não garante vencer, e se você <i>já</i> tem a melhor mão, sua chance é bem maior
-que a de “melhorar”.</p>
 
-<h3>6. Mão feita × projeto</h3>
-<p>Um par alto (top pair) no flop costuma estar na frente de 1 oponente (~70–85%). Um projeto de flush sem par
-fica perto de 35–40%. No turn, as mãos feitas ficam ainda mais fortes, porque resta só uma carta.</p>
-
-<h3>7. Leia a textura da mesa</h3>
+<h3>9. Leia a textura da mesa</h3>
 <ul>
 <li>3 cartas do mesmo naipe na mesa: flush possível — mãos como trinca valem menos.</li>
-<li>Mesa com par: full house aparece; seu flush/sequência fica menos seguro.</li>
-<li>Se a sua “mão” está toda na mesa (ex.: a mesa tem uma sequência), todos a têm: o que vale é o seu kicker.</li>
+<li>Mesa com par: full house aparece; seu flush ou sequência fica menos seguro.</li>
+<li>Com o mesmo par, o kicker desempata: A-K num flop com Ás domina A-7.</li>
 </ul>
 
-<h3>8. Kicker importa</h3>
-<p>Com o mesmo par, desempata a carta mais alta restante (kicker). A-K num flop com Ás domina A-7.</p>
-
-<h3>9. Resultado ≠ decisão</h3>
-<p>Uma mão de 80% perde 1 em cada 5 vezes. Julgue suas estimativas pelo erro médio ao longo de muitas mãos,
-não pelo resultado de uma rodada.</p>
+<h3>10. Resultado ≠ decisão</h3>
+<p>Uma mão de 80% perde 1 em cada 5 vezes. Uma boa decisão é a que ganha mais <i>em média</i>: julgue suas jogadas
+pela nota ao longo de muitas mãos, não pelo resultado de uma.</p>
 
 <h3>Atalhos de teclado</h3>
 <ul>
-<li><span class='k'>← →</span> ajusta o palpite em 1 ponto (com <span class='k'>Shift</span>, 5 pontos); roda do mouse também funciona.</li>
-<li><span class='k'>Enter</span> confirma / vai para a próxima mão.</li>
+<li><span class='k'>F</span> desistir · <span class='k'>C</span> passar/pagar · <span class='k'>R</span>
+apostar/aumentar · <span class='k'>Enter</span> ou <span class='k'>S</span> próxima mão.</li>
+<li>No cash game e no torneio: <span class='k'>P</span> pausa; <span class='k'>S</span> pula o resto da jogada dos bots
+quando você já desistiu.</li>
 </ul>
 """
 
 TIPS_HTML_EN = """
-<h3>1. What is the “chance of winning”?</h3>
-<p>It's the <span class='k'>equity</span>: the share of the pot your hand wins on average if everyone goes to the
-river. Wins count as 100%, ties split the pot (half the pot against 1 opponent). The app computes it by
-simulating tens of thousands of random tables (Monte Carlo).</p>
+<h3>1. Decide in three steps</h3>
+<ol>
+<li><span class='k'>Estimate your chance</span> (equity) against the <span class='k'>hands your opponent would play
+this way</span>: nobody raises or bets with any two cards. Pre-flop, position sets the range (~14% of hands from UTG,
+~40% from the button).</li>
+<li><span class='k'>Compare it with the price</span> (pot odds): if someone bet, calling only pays off when your
+chance is higher than the price.</li>
+<li><span class='k'>Check whether it's strong enough to bet</span>: hands well above average win more by betting or
+raising than by just checking or calling.</li>
+</ol>
 
-<h3>2. Start from the fair share</h3>
-<p>With <i>n</i> players, an average hand has <span class='k'>100% ÷ n</span>: 50% against 1 opponent, 33% against 2,
-25% against 3. Ask yourself: is my hand above or below average? Then adjust.</p>
+<h3>2. Pot odds: the price of calling</h3>
+<p>Price = <span class='k'>bet ÷ final pot</span> (the pot after you call). Heads-up:</p>
+<ul>
+<li>A ⅓-pot bet → you need <span class='k'>20%</span> · ½ pot → <span class='k'>25%</span> ·
+⅔ pot → <span class='k'>29%</span> · full pot → <span class='k'>33%</span>.</li>
+<li>When other players have already called, the final pot grows and the price drops — but there are more hands
+to beat.</li>
+<li>The expected value of calling is <span class='k'>chance × final pot − bet</span>. Folding is worth zero.</li>
+</ul>
 
-<h3>3. Pre-flop benchmarks (against 1 opponent)</h3>
+<h3>3. Value betting</h3>
+<p>Bet (or raise) for value when you're <span class='k'>ahead of the hands that call</span> — more than 50% against
+them. Being ahead of the whole range isn't enough: whoever calls a bet usually has a better hand than whoever folds.
+With a very strong hand, bet big (⅔ pot or more); with thin value (top pair), ⅓ to ⅔ pot.</p>
+
+<h3>4. Semi-bluffing</h3>
+<p>On the flop and turn, strong draws (<span class='k'>8 or more outs</span>, like a flush draw or an open-ended
+straight draw) can bet without a made hand: sometimes they win the pot right away, and if called they can still
+hit.</p>
+
+<h3>5. Checking is free</h3>
+<p>If nobody bet, never fold: checking costs nothing and you see the next card.</p>
+
+<h3>6. Pre-flop benchmarks (heads-up)</h3>
 <ul>
 <li><span class='k'>AA</span> ≈ 85% · <span class='k'>KK</span> ≈ 82% · <span class='k'>QQ</span> ≈ 80% · <span class='k'>JJ</span> ≈ 77%</li>
 <li><span class='k'>AKs</span> ≈ 67% · <span class='k'>AKo</span> ≈ 65% · <span class='k'>AQo</span> ≈ 64%</li>
 <li><span class='k'>22</span> ≈ 50% — even the smallest pair is a slight favorite against a random hand.</li>
-<li>Worst hand: <span class='k'>32o</span> ≈ 32%. Even trash wins almost 1 time in 3!</li>
-<li>Being suited adds only ~2–4 points; connected cards, ~1–2.</li>
+<li>Worst hand: <span class='k'>32o</span> ≈ 32%. Being suited adds only ~2–4 points; connected cards, ~1–2.</li>
 </ul>
 
-<h3>4. More opponents, less chance</h3>
-<p>AA drops from ~85% (1 opponent) to ~73% (2), ~64% (3) and ~56% (4). Speculative hands (small pairs,
-suited connectors) lose less relative value, because when they hit they tend to win big pots.</p>
+<h3>7. More opponents, less chance</h3>
+<p>AA drops from ~85% (1 opponent) to ~73% (2), ~64% (3) and ~56% (4). Speculative hands (small pairs, suited
+connectors) lose less relative value, because when they hit they tend to win big pots.</p>
 
-<h3>5. After the flop: count your outs</h3>
-<p><span class='k'>Outs</span> are cards that improve your hand. Rule of thumb:</p>
+<h3>8. After the flop: count your outs</h3>
 <ul>
 <li>On the <span class='k'>flop</span> (2 cards to come): outs × 4 ≈ % to hit by the river.</li>
 <li>On the <span class='k'>turn</span> (1 card to come): outs × 2 ≈ % to hit on the river.</li>
 <li>Flush draw = 9 outs (~35% from the flop) · open-ended straight = 8 (~31%) · gutshot = 4 (~16%).</li>
 </ul>
-<p>But careful: hitting an out doesn't guarantee a win, and if you <i>already</i> have the best hand, your chance
-is much higher than your chance to “improve”.</p>
 
-<h3>6. Made hand vs. draw</h3>
-<p>A top pair on the flop is usually ahead of 1 opponent (~70–85%). A flush draw without a pair sits around
-35–40%. On the turn, made hands get even stronger, because only one card is left.</p>
-
-<h3>7. Read the board texture</h3>
+<h3>9. Read the board texture</h3>
 <ul>
 <li>3 cards of one suit on the board: a flush is possible — hands like trips are worth less.</li>
-<li>Paired board: full houses show up; your flush/straight is less safe.</li>
-<li>If your whole “hand” is on the board (e.g. the board is a straight), everyone has it: your kicker is what counts.</li>
+<li>Paired board: full houses show up; your flush or straight is less safe.</li>
+<li>With the same pair, the kicker breaks the tie: A-K on an Ace-high flop dominates A-7.</li>
 </ul>
 
-<h3>8. The kicker matters</h3>
-<p>With the same pair, the highest remaining card (kicker) breaks the tie. A-K on an Ace-high flop dominates A-7.</p>
-
-<h3>9. Result ≠ decision</h3>
-<p>An 80% hand loses 1 time in 5. Judge your estimates by your average error over many hands, not by the
-result of a single round.</p>
+<h3>10. Result ≠ decision</h3>
+<p>An 80% hand loses 1 time in 5. A good decision is the one that wins more <i>on average</i>: judge your plays by
+your score over many hands, not by the result of one.</p>
 
 <h3>Keyboard shortcuts</h3>
 <ul>
-<li><span class='k'>← →</span> adjust the guess by 1 point (with <span class='k'>Shift</span>, 5 points); the mouse wheel works too.</li>
-<li><span class='k'>Enter</span> confirms / goes to the next hand.</li>
+<li><span class='k'>F</span> fold · <span class='k'>C</span> check/call · <span class='k'>R</span> bet/raise ·
+<span class='k'>Enter</span> or <span class='k'>S</span> next hand.</li>
+<li>In cash games and tournaments: <span class='k'>P</span> pause; <span class='k'>S</span> skips the rest of the bots'
+play once you've folded.</li>
 </ul>
 """
 
 
 class TipsPage(QWidget):
+    closeRequested = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        page, v = _page_shell(tr("Dicas", "Tips"), tr("Como estimar a chance de vencer sem calculadora.",
-                                                         "How to estimate your chance of winning without a calculator."))
+        page, v = _page_shell(tr("Dicas", "Tips"),
+                              tr("Como decidir entre desistir, pagar e aumentar — sem calculadora.",
+                                 "How to choose between folding, calling and raising — without a calculator."),
+                              on_close=self.closeRequested.emit)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(page)
@@ -490,45 +545,67 @@ class TipsPage(QWidget):
 # ---------------------------------------------------------------- configurações
 
 class SettingsPage(QWidget):
-    blurChanged = Signal(int)
     statsReset = Signal()
+    closeRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         page, v = _page_shell(tr("Configurações", "Settings"),
-                              tr("As mudanças valem a partir da próxima mão.", "Changes apply from the next hand on."))
+                              tr("As mudanças valem a partir da próxima mão.", "Changes apply from the next hand on."),
+                              on_close=self.closeRequested.emit)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(page)
 
         form = QFormLayout()
         form.setHorizontalSpacing(24)
-        form.setVerticalSpacing(14)
+        form.setVerticalSpacing(12)
         form.setLabelAlignment(Qt.AlignRight)
 
+        def section(text: str, first: bool = False) -> None:
+            if not first:
+                spacer = QWidget()
+                spacer.setFixedHeight(8)
+                form.addRow(spacer)
+            sec = QLabel(text.upper())
+            sec.setObjectName("section")
+            form.addRow(sec)
+
+        # treino
+        section(tr("Treino de decisões", "Decision training"), first=True)
         self.opp = QSpinBox()
         self.opp.setRange(1, 9)
         self.opp.setValue(S.get("opponents"))
         self.opp.valueChanged.connect(lambda x: S.put("opponents", x))
-        form.addRow(tr("Número de oponentes", "Number of opponents"), self.opp)
-
+        form.addRow(tr("Oponentes na mão", "Opponents in the hand"), self.opp)
         self.rand = QCheckBox(tr(f"Aleatório: sortear de 1 a {S.MAX_OPPONENTS} a cada mão",
                                  f"Random: draw 1 to {S.MAX_OPPONENTS} every hand"))
         self.rand.setChecked(S.get("random_opponents"))
         self.rand.toggled.connect(self._random_toggled)
         self.opp.setEnabled(not self.rand.isChecked())
         form.addRow("", self.rand)
-
         self.range = QComboBox()
         for pct in coach.RANGES:
             self.range.addItem(coach.range_name(pct), pct)
         self.range.setCurrentIndex(max(0, self.range.findData(S.get("opp_range"))))
         self.range.currentIndexChanged.connect(lambda i: S.put("opp_range", self.range.itemData(i)))
         form.addRow(tr("Mãos dos oponentes", "Opponents' hands"), self.range)
+        self.prec = QComboBox()
+        precisions = S.precisions()
+        for name, n in precisions:
+            self.prec.addItem(name, n)
+        cur = S.get("iterations")
+        self.prec.setCurrentIndex(next((i for i, (_, n) in enumerate(precisions) if n == cur), 1))
+        self.prec.currentIndexChanged.connect(lambda i: S.put("iterations", self.prec.itemData(i)))
+        form.addRow(tr("Precisão do cálculo", "Calculation precision"), self.prec)
+        self.name = QCheckBox(tr("Mostrar o nome da mão atual (ex.: “Par de Ases”)",
+                                 "Show the current hand's name (e.g. “Pair of Aces”)"))
+        self.name.setChecked(S.get("show_hand_name"))
+        self.name.toggled.connect(lambda x: S.put("show_hand_name", x))
+        form.addRow("", self.name)
 
-        sec = QLabel(tr("JOGO SIMULADO", "SIMULATED GAME"))
-        sec.setObjectName("section")
-        form.addRow(sec)
+        # jogo
+        section(tr("Cash game e torneio", "Cash game and tournament"))
         self.diff = QComboBox()
         for k in ai.DIFFICULTIES:
             self.diff.addItem(ai.difficulty_name(k), k)
@@ -539,8 +616,13 @@ class SettingsPage(QWidget):
         self.diff_help.setStyleSheet("font-size: 12px;")
         self.diff.currentIndexChanged.connect(self._diff_changed)
         self._diff_changed(self.diff.currentIndex(), save=False)
-        form.addRow(tr("Dificuldade dos bots", "Bot difficulty"), self.diff)
-        form.addRow("", self.diff_help)
+        diff_box = QWidget()
+        dl = QVBoxLayout(diff_box)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(6)
+        dl.addWidget(self.diff)
+        dl.addWidget(self.diff_help)
+        form.addRow(tr("Dificuldade dos bots", "Bot difficulty"), diff_box)
         self.play_opp = QSpinBox()
         self.play_opp.setRange(1, S.MAX_OPPONENTS)
         self.play_opp.setValue(S.get("play_opponents"))
@@ -562,44 +644,25 @@ class SettingsPage(QWidget):
         self.assist.setChecked(S.get("play_assist"))
         self.assist.toggled.connect(lambda x: S.put("play_assist", x))
         form.addRow("", self.assist)
-        sec2 = QLabel(tr("TREINO", "TRAINING"))
-        sec2.setObjectName("section")
-        form.addRow(sec2)
+        self.mucked = QCheckBox(tr("Mostrar as cartas de quem descartou no showdown (aprendizado)",
+                                   "Show the cards of players who mucked at showdown (learning)"))
+        self.mucked.setToolTip(tr("Numa mesa real, quem perde no showdown pode descartar a mão sem mostrar.",
+                                  "At a real table, a player who loses at showdown can muck without showing."))
+        self.mucked.setChecked(S.get("show_mucked"))
+        self.mucked.toggled.connect(lambda x: S.put("show_mucked", x))
+        form.addRow("", self.mucked)
+        self.show_bb = QCheckBox(tr("Mostrar valores em big blinds (bb) na mesa",
+                                    "Show amounts in big blinds (bb) at the table"))
+        self.show_bb.setChecked(S.get("show_bb"))
+        self.show_bb.toggled.connect(lambda x: S.put("show_bb", x))
+        form.addRow("", self.show_bb)
 
-        self.prec = QComboBox()
-        precisions = S.precisions()
-        for name, n in precisions:
-            self.prec.addItem(name, n)
-        cur = S.get("iterations")
-        self.prec.setCurrentIndex(next((i for i, (_, n) in enumerate(precisions) if n == cur), 1))
-        self.prec.currentIndexChanged.connect(lambda i: S.put("iterations", self.prec.itemData(i)))
-        form.addRow(tr("Precisão do cálculo", "Calculation precision"), self.prec)
-
-        self.tol = QSpinBox()
-        self.tol.setRange(1, 20)
-        self.tol.setSuffix(tr(" pontos", " points"))
-        self.tol.setValue(S.get("tolerance"))
-        self.tol.valueChanged.connect(lambda x: S.put("tolerance", x))
-        form.addRow(tr("Margem para contar acerto", "Margin to count as a hit"), self.tol)
-
-        self.blur = QSlider(Qt.Horizontal)
-        self.blur.setRange(0, 60)
-        self.blur.setValue(S.get("blur"))
-        self.blur.setMinimumWidth(220)
-        self.blur.sliderReleased.connect(self._blur_done)
-        form.addRow(tr("Desfoque do fundo", "Background blur"), self.blur)
-
-        self.name = QCheckBox(tr("Mostrar o nome da mão atual (ex.: “Par de Ases”)",
-                                 "Show the current hand's name (e.g. “Pair of Aces”)"))
-        self.name.setChecked(S.get("show_hand_name"))
-        self.name.toggled.connect(lambda x: S.put("show_hand_name", x))
-        form.addRow("", self.name)
-
+        # aparência e som
+        section(tr("Aparência e som", "Look and sound"))
         self.anim = QCheckBox(tr("Animar cartas", "Animate cards"))
         self.anim.setChecked(S.get("animations"))
         self.anim.toggled.connect(lambda x: S.put("animations", x))
         form.addRow("", self.anim)
-
         self.snd = QCheckBox(tr("Sons (fichas, cartas, sua vez)", "Sounds (chips, cards, your turn)"))
         self.snd.setChecked(S.get("sounds"))
         self.snd.toggled.connect(lambda x: S.put("sounds", x))
@@ -611,10 +674,15 @@ class SettingsPage(QWidget):
         self.vol.sliderReleased.connect(self._vol_done)
         form.addRow(tr("Volume", "Volume"), self.vol)
 
+        # dados
+        section(tr("Dados", "Data"))
         reset = QPushButton(tr("Zerar estatísticas", "Reset statistics"))
-        reset.setStyleSheet("text-align: center;")
+        reset.setObjectName("danger")
+        reset.setCursor(Qt.PointingHandCursor)
+        reset.setToolTip(tr("Apaga as estatísticas e o histórico do treino e do jogo.",
+                            "Erases the training and game statistics and history."))
         reset.clicked.connect(self._reset)
-        form.addRow("", reset)
+        form.addRow(tr("Estatísticas", "Statistics"), reset)
         self.reset_info = QLabel("")
         self.reset_info.setObjectName("muted")
         form.addRow("", self.reset_info)
@@ -679,12 +747,16 @@ class SettingsPage(QWidget):
         self.range.blockSignals(True)
         self.range.setCurrentIndex(max(0, self.range.findData(S.get("opp_range"))))
         self.range.blockSignals(False)
-
-    def _blur_done(self) -> None:
-        S.put("blur", self.blur.value())
-        self.blurChanged.emit(self.blur.value())
+        self.show_bb.blockSignals(True)
+        self.show_bb.setChecked(S.get("show_bb"))
+        self.show_bb.blockSignals(False)
 
     def _reset(self) -> None:
+        ans = QMessageBox.question(self, tr("Zerar estatísticas", "Reset statistics"),
+                                   tr("Apagar todas as estatísticas e o histórico? Isso não pode ser desfeito.",
+                                      "Erase all statistics and history? This can't be undone."))
+        if ans != QMessageBox.Yes:
+            return
         S.reset_stats()
         self.reset_info.setText(tr("Estatísticas zeradas.", "Statistics reset."))
         self.statsReset.emit()

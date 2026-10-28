@@ -296,7 +296,6 @@ def test_memory_reaction_depends_on_personality():
 
 
 def test_conservative_only_bets_with_50_percent():
-    from types import SimpleNamespace
     pers = ai.make_personality("easy", random.Random(2))
     pers.archetype = "conservative"
     bot = ai.Bot(pers, random.Random(3))
@@ -426,7 +425,8 @@ def test_champion_beats_a_table_of_pros():
     champ = sum(r[0] for r in res) / len(res)
     rest = sum(r[1] for r in res) / len(res)
     assert champ > 0 > rest
-    assert champ / 10 * 100 > 100          # mais de 100 big blinds a cada 100 mãos contra profissionais
+    # amostra pequena (5.600 mãos): só exige vantagem clara; em 36 mil mãos o Campeão faz ~+95 bb/100 e os pros ~−24
+    assert champ / 10 * 100 > 40
 
 
 def test_champion_is_balanced():
@@ -501,3 +501,71 @@ def test_initial_bias_fades_with_evidence():
     for _ in range(20):
         b.observe_hand(_fake_showdown(target, "Ah Ad", "As Kh 9s 5c 3h"), 0)
     assert w0 == 1.0 and b._bias_weight(rd) < 0.5
+
+
+def test_short_allin_raise_does_not_reopen_action():
+    # 3 jogadores: A aposta, B vai all-in com pouco mais que a aposta (aumento incompleto), C paga.
+    t = make([1000, 1000, 1000])
+    t.start_hand()
+    while t.street == "preflop":       # todos pagam e passam até o flop
+        t.act("call") if not t.legal().can_check else t.act("check")
+    first = t.to_act
+    t.act("raise", 100)                # aposta 100
+    second = t.to_act
+    p = t.players[second]
+    p.stack = 130                      # all-in de 130: aumento de 30 (< 100) = incompleto
+    t.act("allin")
+    third = t.to_act
+    assert t.legal(third).can_raise    # ainda não tinha agido: pode aumentar
+    t.act("call")
+    # de volta a quem apostou primeiro: só paga ou larga
+    assert t.to_act == first
+    lg = t.legal(first)
+    assert lg.to_call == 30 and not lg.can_raise
+
+
+def test_big_blind_ante_goes_to_pot():
+    t = T.Table([T.Player(f"P{i}", 1000, is_hero=i == 0) for i in range(4)], 50, 100, random.Random(5), ante=100)
+    t.start_hand()
+    assert t.pot == 50 + 100 + 100
+    bb = [p for p in t.players if p.bet == 100][0]
+    assert bb.total == 200 and bb.stack == 800
+    lg = t.legal()
+    assert lg.to_call == 100            # a ante não conta como aposta
+    while not t.hand_over:
+        t.act("fold")
+    assert sum(p.stack for p in t.players) == 4000
+
+
+def test_losers_can_muck_at_showdown():
+    t = make([1000, 1000, 1000])
+    t.start_hand()
+    t.players[0].hole, t.players[1].hole, t.players[2].hole = cs("As Ah"), cs("7c 2d"), cs("Ks Kh")
+    board = cs("Qd 9s 5c 3h 4d")
+    used = set(cs("As Ah 7c 2d Ks Kh")) | set(board)
+    burn = [c for c in range(52) if c not in used]
+    # o baralho sai do fim: carta queimada antes de cada rua
+    t.deck = burn[:-3] + [board[4], burn[-3], board[3], burn[-2], board[2], board[1], board[0], burn[-1]]
+    while not t.hand_over:
+        t.act("call") if not t.legal().can_check else t.act("check")
+    assert set(t.showdown_hands) == {0, 1, 2}
+    # quem mostrou: o primeiro na ordem e quem empata/vence; o 7-2 perde e descarta
+    assert 0 in t.shown and 1 not in t.shown
+
+
+def test_assistant_ranges_follow_the_action():
+    from pokertrainer import ranges as R
+    t = make([1000, 1000, 1000])
+    t.start_hand()
+    # quem age primeiro aumenta; a faixa dele fica mais forte do que a de quem só está no big blind
+    while t.to_act != 0 and not t.hand_over:
+        seat = t.to_act
+        t.act("raise", 30) if t.players[seat].bets_raises == 0 and t.current_bet == 10 else t.act("call")
+    if t.hand_over or t.to_act != 0:
+        return
+    ranges = R.table_ranges(t, 0)
+    distinct = [len(set(r)) for r in ranges]
+    raiser = next(i for i in t.seats_in_hand() if i != 0 and t.players[i]._pfr_hand)
+    k = [i for i in t.seats_in_hand() if i != 0].index(raiser)
+    # quem aumentou não tem qualquer mão: a faixa dele é bem menor que as 1326 combinações
+    assert distinct[k] < 1326 * R.open_pct(t.position_of(raiser)) / 100 + 60

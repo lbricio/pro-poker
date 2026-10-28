@@ -235,6 +235,7 @@ class EquityResult:
     final_categories: list[float] = field(default_factory=lambda: [0.0] * 9)  # sua mão final no river
     stderr: float = 0.0
     vs_random: float | None = None   # mesma mão contra mãos aleatórias (quando os oponentes têm faixa)
+    eq_call: float | None = None     # contra as mãos que pagariam a sua aposta/aumento (treino de decisões)
 
 
 def label_combos(labels) -> list[tuple[int, int]]:
@@ -248,13 +249,18 @@ def _pick_range_hands(combos: list[tuple[int, int]], n: int, used: set[int], rng
     hands = []
     choice = rng.choice
     for _ in range(n):
-        for _try in range(10000):
+        for _try in range(60):
             a, b = choice(combos)
             if a not in used and b not in used:
                 break
-        else:  # faixa toda bloqueada: cai para mão aleatória
-            free = [c for c in range(52) if c not in used]
-            a, b = rng.sample(free, 2)
+        else:
+            # muitas colisões (faixas estreitas e parecidas): sorteia entre as combinações ainda livres
+            free_combos = [(x, y) for x, y in combos if x not in used and y not in used]
+            if free_combos:
+                a, b = choice(free_combos)
+            else:  # faixa toda bloqueada: cai para mão aleatória
+                free = [c for c in range(52) if c not in used]
+                a, b = rng.sample(free, 2)
         used.add(a)
         used.add(b)
         hands.append([a, b])
@@ -263,16 +269,21 @@ def _pick_range_hands(combos: list[tuple[int, int]], n: int, used: set[int], rng
 
 def equity(hero: list[int], board: list[int], n_opponents: int, iterations: int = 20000,
            rng: random.Random | None = None, cancel=None,
-           opp_combos: list[tuple[int, int]] | None = None) -> EquityResult:
+           opp_combos: list[tuple[int, int]] | None = None,
+           opp_ranges: list[list[tuple[int, int]]] | None = None) -> EquityResult:
     """Probabilidade de a mão do jogador vencer contra `n_opponents` mãos, até o river.
 
-    Por padrão as mãos dos oponentes são aleatórias; com `opp_combos` elas saem dessa faixa de mãos.
+    Por padrão as mãos dos oponentes são aleatórias; com `opp_combos` elas saem dessa faixa de mãos; com
+    `opp_ranges` cada oponente tem a sua faixa (combinações repetidas = mais peso), e `n_opponents` é ignorado.
     Empates contam como fração (1/k do pote quando k jogadores empatam).
     `cancel` é uma função opcional chamada de tempos em tempos; se retornar True, a simulação para.
     """
     rng = rng or random.Random()
     table = rank_table()
     known = set(hero) | set(board)
+    if opp_ranges is not None:
+        n_opponents = len(opp_ranges)
+        opp_ranges = [[(a, b) for a, b in r if a not in known and b not in known] or None for r in opp_ranges]
     deck = [c for c in range(52) if c not in known]
     need_board = 5 - len(board)
     need = need_board + 2 * n_opponents
@@ -309,7 +320,21 @@ def equity(hero: list[int], board: list[int], n_opponents: int, iterations: int 
     for it in range(iterations):
         if cancel is not None and (it & 1023) == 0 and cancel():
             break
-        if opp_combos is None:
+        if opp_ranges is not None:
+            used = set(known)
+            hands = []
+            for r in opp_ranges:
+                if r is None:
+                    free = [c for c in deck if c not in used]
+                    h = sample(free, 2)
+                    used.update(h)
+                    hands.append(h)
+                else:
+                    hands += _pick_range_hands(r, 1, used, rng)
+            draw = sample([c for c in deck if c not in used], need_board)
+            for h in hands:
+                draw += h
+        elif opp_combos is None:
             draw = sample(deck, need)
         else:
             used = set(known)

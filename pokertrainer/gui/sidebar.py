@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from pokertrainer import ai
+from pokertrainer import decision as D
 from pokertrainer import engine as E
 from pokertrainer import profile as PF
 from pokertrainer import settings as S
@@ -34,50 +35,65 @@ def tournament_rules(difficulty: str | None = None) -> str:
     d = difficulty or S.get("difficulty")
     n = ai.tournament_rounds(d)
     return tr(f"<b>Torneio em {n} rodadas</b> (dificuldade {ai.difficulty_name(d)}).<br><br>"
-              "Cada rodada é uma mesa nova: todos começam com 1000 fichas, sem recompra, e os blinds sobem a cada "
-              "10 mãos. Quando metade da mesa for eliminada, quem sobrou passa para a próxima rodada.<br><br>"
-              "Na <b>mesa final</b> só há um vencedor: fique com todas as fichas para ganhar o título. 🏆",
+              "Todos começam com 1000 fichas (100 big blinds), sem recompra. Os blinds sobem a cada 15 mãos, com "
+              "ante do big blind a partir do 3º nível. Quando metade da mesa for eliminada, quem sobrou passa de "
+              "rodada e <b>leva as suas fichas</b> para uma mesa nova.<br><br>"
+              "Na <b>bolha</b> (falta uma eliminação) sobreviver vale mais que fichas. Na <b>mesa final</b> só há um "
+              "vencedor: fique com todas as fichas para ganhar o título. 🏆",
               f"<b>{n}-round tournament</b> ({ai.difficulty_name(d)} difficulty).<br><br>"
-              "Each round is a new table: everyone starts with 1000 chips, no rebuys, and the blinds go up every "
-              "10 hands. Once half the table is knocked out, the survivors move on to the next round.<br><br>"
-              "The <b>final table</b> has a single winner: take all the chips to win the title. 🏆")
+              "Everyone starts with 1000 chips (100 big blinds), no rebuys. The blinds go up every 15 hands, with a "
+              "big blind ante from level 3. Once half the table is knocked out, the survivors advance and <b>carry "
+              "their chips</b> to a new table.<br><br>"
+              "On the <b>bubble</b> (one knockout left) surviving is worth more than chips. The <b>final table</b> has "
+              "a single winner: take all the chips to win the title. 🏆")
 
 
-class ModeButton(QPushButton):
-    def __init__(self, mode: S.Mode, parent=None) -> None:
+def training_help() -> str:
+    return "<span style='color:#9fb3ad'>" + tr(
+        "Escolha a jogada nos botões ou pelo teclado: <b>F</b> desistir, <b>C</b> passar/pagar, "
+        "<b>R</b> apostar/aumentar. A análise aparece aqui.",
+        "Pick your play with the buttons or the keyboard: <b>F</b> fold, <b>C</b> check/call, "
+        "<b>R</b> bet/raise. The analysis shows up here.") + "</span>"
+
+
+class MenuButton(QPushButton):
+    """Botão grande do menu: título, subtítulo e um selo à direita."""
+
+    def __init__(self, title: str, subtitle: str, badge: str, badge_tip: str = "", parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("mode")
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(54)
+        self.setMinimumHeight(48)
         h = QHBoxLayout(self)
-        h.setContentsMargins(14, 6, 14, 6)
+        h.setContentsMargins(14, 4, 14, 4)
         v = QVBoxLayout()
         v.setSpacing(1)
-        t = QLabel(mode.title)
+        t = QLabel(title)
         t.setStyleSheet("font-size: 16px; font-weight: 800; background: transparent;")
-        s = QLabel(mode.subtitle)
+        s = QLabel(subtitle)
         s.setStyleSheet("font-size: 12px; color: #9fb3ad; background: transparent;")
         for lbl in (t, s):
             lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         v.addWidget(t)
         v.addWidget(s)
         h.addLayout(v, 1)
-        if mode.key == "tournament":
-            dots = QLabel("🏆")
-            dots.setToolTip(tr("Rodadas eliminatórias, sem recompra", "Knockout rounds, no rebuys"))
-        elif mode.is_play:
-            dots = QLabel("♠♥♦♣")
-            dots.setToolTip(tr("Partida completa com apostas", "A full game with betting"))
-        elif mode.visible < 0:
-            dots = QLabel("●● 💰")
-            dots.setToolTip(tr("Flop ou turn, com aposta para pagar", "Flop or turn, facing a bet"))
-        else:
-            n = 2 + mode.visible
-            dots = QLabel("●" * 2 + (" " + "●" * mode.visible if mode.visible else ""))
-            dots.setToolTip(tr(f"{n} cartas conhecidas", f"{n} known cards"))
+        dots = QLabel(badge)
+        dots.setToolTip(badge_tip)
         dots.setStyleSheet("color: #f5c542; font-size: 11px; letter-spacing: 2px; background: transparent;")
         dots.setAttribute(Qt.WA_TransparentForMouseEvents)
         h.addWidget(dots)
+
+
+class ModeButton(MenuButton):
+    def __init__(self, mode: S.Mode, parent=None) -> None:
+        if mode.key == "tournament":
+            badge, tip = "🏆", tr("Rodadas eliminatórias, sem recompra", "Knockout rounds, no rebuys")
+        elif mode.is_play:
+            badge, tip = "♠♥♦♣", tr("Partida completa com apostas", "A full game with betting")
+        else:
+            badge = "●" * 2 + (" " + "●" * mode.visible if mode.visible else "")
+            tip = tr(f"{2 + mode.visible} cartas conhecidas", f"{2 + mode.visible} known cards")
+        super().__init__(mode.title, mode.subtitle, badge, tip, parent)
 
 
 class Stat(QWidget):
@@ -96,7 +112,7 @@ class Stat(QWidget):
 
 class Sidebar(Glass):
     modeChosen = Signal(object)        # S.Mode
-    navigate = Signal(str)             # "game" | "table" | "tips" | "settings" | "home"
+    navigate = Signal(str)             # "game" | "help" | "table" | "stats" | "tips" | "settings" | "home"
     newHand = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -106,9 +122,9 @@ class Sidebar(Glass):
         root.setContentsMargins(18, 20, 18, 16)
         root.setSpacing(10)
 
-        title = QLabel("♠ Poker Trainer")
+        title = QLabel("♠ Pro Poker Trainer")
         title.setObjectName("appTitle")
-        sub = QLabel(tr("Treine seu olho para probabilidades", "Train your eye for probabilities"))
+        sub = QLabel(tr("Treino de decisões de Texas Hold'em", "Texas Hold'em decision training"))
         sub.setObjectName("appSubtitle")
         root.addWidget(title)
         root.addWidget(sub)
@@ -126,10 +142,11 @@ class Sidebar(Glass):
         self.nav_group.setExclusive(True)
         self.nav_buttons: dict[str, QPushButton] = {}
         for key, text in [("game", tr("🃏   Mesa", "🃏   Table")),
+                          ("help", tr("📖   Como jogar", "📖   How to play")),
                           ("table", tr("📊   Tabela de probabilidades", "📊   Probability charts")),
                           ("stats", tr("📈   Estatísticas e revisão", "📈   Stats and review")),
                           ("tips", tr("💡   Dicas", "💡   Tips")),
-                          ("settings", tr("⚙   Configurações", "⚙   Settings"))]:
+                          ("settings", tr("⚙️   Configurações", "⚙️   Settings"))]:
             b = QPushButton(text)
             b.setObjectName("nav")
             b.setCheckable(True)
@@ -143,17 +160,18 @@ class Sidebar(Glass):
 
     # ------------------------------------------------------------ menu inicial
     def _build_menu(self) -> QWidget:
+        """Menu inicial: modos de jogo em cima e os modos de treino embaixo."""
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
         groups = [
-            (tr("Modos de treino", "Training modes"), [m for m in S.MODES if not m.is_play],
-             tr("Adivinhe a chance de a mão vencer: quanto mais perto do valor real, mais pontos.",
-                "Guess the hand's chance of winning: the closer to the actual value, the more points.")),
             (tr("Modos de jogo", "Game modes"), [m for m in S.MODES if m.is_play],
              tr("Jogue de verdade contra bots com personalidade. A dificuldade fica em Configurações.",
                 "Play for real against bots with personalities. Difficulty is in Settings.")),
+            (tr("Modos de treino", "Training modes"), [m for m in S.MODES if not m.is_play],
+             tr("Uma situação por mão: desista, passe/pague ou aposte/aumente e veja se foi a melhor jogada.",
+                "One spot per hand: fold, check/call or bet/raise and see whether it was the best play.")),
         ]
         self.mode_buttons: dict[str, ModeButton] = {}
         for k, (title, modes, help_text) in enumerate(groups):
@@ -199,8 +217,9 @@ class Sidebar(Glass):
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(8)
-        self.st_points, self.st_avg = Stat(tr("pontos", "points")), Stat(tr("erro médio", "average error"))
-        self.st_hits, self.st_streak = Stat(tr("acertos", "hits")), Stat(tr("sequência (recorde)", "streak (best)"))
+        self.st_points, self.st_avg = Stat(tr("pontos", "points")), Stat(tr("melhor jogada", "best play"))
+        self.st_hits, self.st_streak = Stat(tr("sem erro", "no mistake")), Stat(tr("sequência (recorde)",
+                                                                                  "streak (best)"))
         grid.addWidget(self.st_points, 0, 0)
         grid.addWidget(self.st_avg, 0, 1)
         grid.addWidget(self.st_hits, 1, 0)
@@ -262,7 +281,7 @@ class Sidebar(Glass):
         self.stack.setCurrentIndex(0)
         self.nav_buttons["game"].hide()
 
-    def show_game(self, mode: S.Mode) -> None:
+    def show_game(self, mode: S.Mode, difficulty: str | None = None) -> None:
         self.stack.setCurrentIndex(1)
         self.mode_title.setText(mode.title if mode.is_play else tr(f"Modo {mode.title}", f"{mode.title} mode"))
         self.nav_buttons["game"].show()
@@ -272,7 +291,7 @@ class Sidebar(Glass):
                                  tr("↻  Nova partida", "↻  New game"))
             self.set_play_stats({"hands": 0, "won": 0, "good": 0, "decisions": 0, "stack": 0, "profit": 0})
             if mode.key == "tournament":
-                self.analysis.setText(tournament_rules())
+                self.analysis.setText(tournament_rules(difficulty))
                 return
             self.analysis.setText(tr("Jogue contra os bots. Quando você enfrentar uma aposta, as dicas de pot odds "
                                      "aparecem aqui e no histórico da mão.",
@@ -281,10 +300,7 @@ class Sidebar(Glass):
             return
         self.new_btn.setText(tr("↻  Nova mão", "↻  New hand"))
         self.refresh_stats(mode)
-        self.analysis.setText(tr("Arraste a barra (ou use ← →) e confirme com Enter para ver a resposta e a "
-                                 "explicação.",
-                                 "Drag the bar (or use ← →) and confirm with Enter to see the answer and the "
-                                 "explanation."))
+        self.analysis.setText(training_help())
 
     def set_play_stats(self, s: dict) -> None:
         n = s["hands"]
@@ -333,64 +349,72 @@ class Sidebar(Glass):
         if mode.is_play:
             return
         self.st_points.lbl.setText(tr("pontos", "points"))
-        self.st_avg.lbl.setText(tr("erro médio", "average error"))
-        self.st_hits.lbl.setText(tr("acertos", "hits"))
+        self.st_avg.lbl.setText(tr("melhor jogada", "best play"))
+        self.st_hits.lbl.setText(tr("sem erro", "no mistake"))
+        self.st_streak.lbl.setText(tr("sequência (recorde)", "streak (best)"))
         st = S.load_stats(mode.key)
-        self.round_lbl.setText(tr(f"{st.rounds} mão{'s' if st.rounds != 1 else ''}",
-                                   f"{st.rounds} hand{'s' if st.rounds != 1 else ''}"))
+        n = st.hands
+        self.round_lbl.setText(tr(f"{n} decis{'ões' if n != 1 else 'ão'}", f"{n} decision{'s' if n != 1 else ''}"))
         self.st_points.value.setText(f"{st.points}")
-        self.st_avg.value.setText(f"{st.avg_error:.1f} pts" if st.rounds else "–")
-        self.st_hits.value.setText(f"{st.hit_rate:.0%}" if st.rounds else "–")
-        if mode.key == "potodds":
-            self.st_streak.lbl.setText(tr("decisões certas", "right decisions"))
-            self.st_streak.value.setText(f"{st.good_decisions / st.decisions:.0%}" if st.decisions else "–")
-        else:
-            self.st_streak.lbl.setText(tr("sequência (recorde)", "streak (best)"))
-            self.st_streak.value.setText(f"{st.streak} ({st.best_streak})")
+        self.st_avg.value.setText(f"{st.best_rate:.0%}" if n else "–")
+        self.st_hits.value.setText(f"{st.good_rate:.0%}" if n else "–")
+        self.st_streak.value.setText(f"{st.streak} ({st.best_streak})")
 
     def round_started(self) -> None:
-        self.analysis.setText("<span style='color:#9fb3ad'>" + tr(
-            "Arraste a barra (ou use ← →) e confirme com Enter.",
-            "Drag the bar (or use ← →) and confirm with Enter.") + "</span>")
+        self.analysis.setText(training_help())
 
     def show_result(self, res) -> None:
-        r = res.eq
+        r, v, sp = res.eq, res.verdict, res.spot
         sep = tr(".", ",")
         sims = f"{r.iterations:,}".replace(",", sep)
-        lines = [
-            f"<p><span style='font-size:22px; font-weight:800; color:{res.rating.color}'>{res.rating.label}</span>"
-            f"&nbsp;&nbsp;<b>+{res.rating.points}</b> {tr('pontos', 'points')}</p>",
-            "<table cellspacing='0' cellpadding='2' width='100%'>"
-            f"<tr><td>{tr('Chance real (equidade)', 'Actual chance (equity)')}</td>"
-            f"<td align='right'><b>{r.equity * 100:.1f}%</b></td></tr>"
-            f"<tr><td style='color:#9fb3ad'>&nbsp;&nbsp;{tr('vitória', 'win')}</td>"
-            f"<td align='right'>{r.win * 100:.1f}%</td></tr>"
-            f"<tr><td style='color:#9fb3ad'>&nbsp;&nbsp;{tr('empate', 'tie')}</td>"
-            f"<td align='right'>{r.tie * 100:.1f}%</td></tr>"
-            f"<tr><td>{tr('Seu palpite', 'Your guess')}</td><td align='right'>{res.guess}%</td></tr>"
-            f"<tr><td>{tr('Erro', 'Error')}</td><td align='right'>{res.error_pp:.1f} pts</td></tr>"
-            "</table>",
-            *([] if res.spot is None or res.called is None else [
-                "<p style='margin-top:6px'>" + (tr("Você pagou", "You called") if res.called else
-                                                tr("Você desistiu", "You folded")) + " — " +
-                ("<b style='color:#3ddc84'>" + tr("decisão certa", "right decision") if res.good_decision else
-                 "<b style='color:#ff6b6b'>" + tr("decisão errada", "wrong decision")) + "</b><br>" +
-                tr(f"precisava de {res.spot.need:.0%} · EV de pagar {res.spot.ev_call(r.equity):+.0f} fichas",
-                   f"needed {res.spot.need:.0%} · EV of calling {res.spot.ev_call(r.equity):+.0f} chips") +
-                "</p>"]),
-            f"<p style='color:#7f948e; font-size:11px'>{sims} {tr('simulações', 'simulations')} · "
-            f"{tr('margem', 'margin')} ±{r.stderr * 196:.1f} pts</p>",
-        ]
-        # distribuição da mão final
+        label, color = D.quality_label(v.quality)
+        rows = []
+        if v.action:
+            mine = D.action_name(v.action)
+            if v.size and v.action in (D.BET, D.RAISE):
+                mine += f" {D.bb(v.size)}"
+            rows.append((tr("Sua jogada", "Your play"), mine))
+        rows.append((tr("Melhor jogada", "Best play"), D.action_name(v.best)))
+        if sp.hero_pos:
+            rows.append((tr("Posição", "Position"), sp.hero_pos + ("" if sp.street == 0 else
+                         tr(" (em posição)", " (in position)") if sp.in_position else tr(" (fora de posição)",
+                                                                                         " (out of position)"))))
+        if sp.kind == "open":
+            rows.append((tr("Sua mão", "Your hand"), f"top {v.pct:.0f}%"))
+            rows.append((tr("Abre-se até", "Open up to"), f"top {D.R.open_pct(sp.hero_pos)}%"))
+        else:
+            rows.append((tr("Chance contra a faixa", "Chance vs. their range"), f"{r.equity:.0%}"))
+            if r.vs_random is not None:
+                rows.append((tr("(contra mãos aleatórias)", "(vs. random hands)"), f"{r.vs_random:.0%}"))
+        if sp.facing_bet and sp.kind != "open":
+            rows.append((tr("Preço para pagar", "Price to call"), f"{v.need:.0%}" +
+                         (f" → {v.need_eff:.0%}" if v.need_eff and abs(v.need_eff - v.need) > 0.005 else "")))
+            rows.append((tr("EV de pagar", "EV of calling"), D.ev_bb(sp, r.equity)))
+        if sp.street >= 3:
+            rows.append((tr("Contra quem pagaria", "Vs. hands that call"), f"{v.value:.0%}"))
+        rows.append((tr("Stack efetivo · SPR", "Eff. stack · SPR"), f"{D.bb(sp.stack)} · {D.num(sp.spr)}"))
+        table = "".join(f"<tr><td>{a}</td><td align='right'><b>{b}</b></td></tr>" for a, b in rows)
+        head = (f"<p><span style='font-size:22px; font-weight:800; color:{color}'>{label}</span>"
+                f"&nbsp;&nbsp;<b>+{v.points}</b> {tr('pontos', 'points')}</p>" if v.action else "")
+        lines = [head, f"<table cellspacing='0' cellpadding='2' width='100%'>{table}</table>",
+                 f"<p style='color:#7f948e; font-size:11px'>{sims} {tr('simulações', 'simulations')} · "
+                 f"{tr('margem', 'margin')} ±{r.stderr * 196:.1f} pts</p>"]
         cats = [(E.category_name(i), p) for i, p in enumerate(r.final_categories) if p >= 0.005]
-        if cats:
-            rows = "".join(
+        if cats and res.deal.visible < 5:
+            bars = "".join(
                 f"<tr><td>{name}</td><td><span style='color:#f5c542'>{'▮' * max(1, round(p * 20))}</span></td>"
                 f"<td align='right'>{p * 100:.0f}%</td></tr>"
                 for name, p in reversed(cats))
             lines.append(f"<p style='margin-top:8px'><b>{tr('Sua mão no river vai ser:', 'Your hand on the river will be:')}</b></p>"
-                         f"<table cellspacing='0' cellpadding='1' width='100%'>{rows}</table>")
+                         f"<table cellspacing='0' cellpadding='1' width='100%'>{bars}</table>")
+        if res.range_pct <= 0:
+            vs = tr("as mãos com que os oponentes fariam o que fizeram (posição e ação)",
+                    "the hands the opponents would play this way (position and action)")
+        elif res.range_pct >= 100:
+            vs = tr("mãos aleatórias", "random hands")
+        else:
+            vs = tr(f"o top {res.range_pct}% das mãos", f"the top {res.range_pct}% of hands")
         lines.append("<p style='color:#9fb3ad; font-size:12px; margin-top:8px'>" + tr(
-            "A chance é calculada contra mãos aleatórias. As dicas desta mão estão ao lado das cartas.",
-            "The chance is computed against random hands. The tips for this hand are next to the cards.") + "</p>")
+            f"A chance é calculada contra {vs}, até o river. A análise completa está ao lado das cartas.",
+            f"The chance is computed against {vs}, to the river. The full analysis is next to the cards.") + "</p>")
         self.analysis.setText("".join(lines))

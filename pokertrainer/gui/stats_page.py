@@ -1,8 +1,9 @@
-"""Estatísticas e revisão: evolução do erro, erro por tipo de mão, histórico e treino focado."""
+"""Estatísticas e revisão: evolução das decisões, acerto por tipo de mão, histórico e treino focado."""
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from pokertrainer import coach
+from pokertrainer import decision as D
 from pokertrainer import engine as E
 from pokertrainer import profile as PF
 from pokertrainer import settings as S
@@ -36,23 +38,23 @@ def cards_text(cards: list[int]) -> str:
 
 # ---------------------------------------------------------------- gráfico
 
-class ErrorChart(QWidget):
-    """Erro de cada mão (pontos cinza) e média móvel (linha dourada), com dica ao passar o mouse."""
+class ScoreChart(QWidget):
+    """Pontos de cada decisão (0 a 100, pontos cinza) e média móvel (linha dourada), com dica ao passar o mouse."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.errors: list[float] = []
+        self.values: list[float] = []
         self.avg: list[float] = []
         self.hover: int | None = None
         self.setMouseTracking(True)
         self.setMinimumHeight(190)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-    def set_data(self, errors: list[float]) -> None:
-        self.errors = errors
+    def set_data(self, values: list[float]) -> None:
+        self.values = values
         self.avg = []
-        for i in range(len(errors)):
-            w = errors[max(0, i - WINDOW + 1):i + 1]
+        for i in range(len(values)):
+            w = values[max(0, i - WINDOW + 1):i + 1]
             self.avg.append(sum(w) / len(w))
         self.hover = None
         self.update()
@@ -61,16 +63,12 @@ class ErrorChart(QWidget):
         return QRectF(44, 30, self.width() - 60, self.height() - 58)
 
     def _ymax(self) -> float:
-        top = max(self.errors) if self.errors else 10
-        for step in (10, 20, 30, 40, 50, 60, 80, 100):
-            if top <= step:
-                return step
-        return 100
+        return 100.0
 
     def _pt(self, i: int, v: float) -> QPointF:
         r = self._plot()
-        n = max(1, len(self.errors) - 1)
-        x = r.left() + (r.width() * i / n if len(self.errors) > 1 else r.width() / 2)
+        n = max(1, len(self.values) - 1)
+        x = r.left() + (r.width() * i / n if len(self.values) > 1 else r.width() / 2)
         return QPointF(x, r.bottom() - r.height() * min(v, self._ymax()) / self._ymax())
 
     def paintEvent(self, _e) -> None:
@@ -86,13 +84,13 @@ class ErrorChart(QWidget):
         p.drawLine(QPointF(r.left(), 10), QPointF(r.left() + 18, 10))
         p.setPen(MUTED)
         p.drawText(QRectF(r.left() + 24, 2, 260, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   tr(f"média das últimas {WINDOW} mãos", f"average of the last {WINDOW} hands"))
+                   tr(f"média das últimas {WINDOW} decisões", f"average of the last {WINDOW} decisions"))
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 90))
         p.drawEllipse(QPointF(r.left() + 250, 10), 4, 4)
         p.setPen(MUTED)
         p.drawText(QRectF(r.left() + 258, 2, 200, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   tr("erro de cada mão", "error per hand"))
+                   tr("pontos de cada decisão", "points per decision"))
         # grade recessiva e eixo y (pontos de erro)
         ymax = self._ymax()
         for k in range(5):
@@ -103,17 +101,17 @@ class ErrorChart(QWidget):
             p.setPen(MUTED)
             p.drawText(QRectF(0, y - 8, r.left() - 8, 16), Qt.AlignRight | Qt.AlignVCenter, f"{v:.0f}")
         p.drawText(QRectF(r.left(), r.bottom() + 6, r.width(), 16), Qt.AlignCenter,
-                   tr(f"últimas {len(self.errors)} mãos (erro em pontos)",
-                      f"last {len(self.errors)} hands (error in points)"))
-        if not self.errors:
+                   tr(f"últimas {len(self.values)} decisões (pontos: 100 = melhor jogada)",
+                      f"last {len(self.values)} decisions (points: 100 = best play)"))
+        if not self.values:
             p.setPen(MUTED)
-            p.drawText(r, Qt.AlignCenter, tr("Jogue algumas mãos para ver sua evolução.",
-                                             "Play a few hands to see your progress."))
+            p.drawText(r, Qt.AlignCenter, tr("Treine algumas mãos para ver sua evolução.",
+                                             "Train a few hands to see your progress."))
             return
         # pontos de cada mão
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 70))
-        for i, v in enumerate(self.errors):
+        for i, v in enumerate(self.values):
             p.drawEllipse(self._pt(i, v), 3, 3)
         # média móvel
         path = QPainterPath(self._pt(0, self.avg[0]))
@@ -126,7 +124,7 @@ class ErrorChart(QWidget):
         last = self._pt(len(self.avg) - 1, self.avg[-1])
         p.setPen(INK)
         p.drawText(QRectF(last.x() - 64, last.y() - 22, 64, 16), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{self.avg[-1]:.1f}")
+                   f"{self.avg[-1]:.0f}")
         # mira
         if self.hover is not None:
             hp = self._pt(self.hover, self.avg[self.hover])
@@ -137,18 +135,19 @@ class ErrorChart(QWidget):
             p.drawEllipse(hp, 5, 5)
 
     def mouseMoveEvent(self, e) -> None:
-        if not self.errors:
+        if not self.values:
             return
         r = self._plot()
-        n = len(self.errors)
+        n = len(self.values)
         x = e.position().x()
         i = 0 if n == 1 else round((x - r.left()) / r.width() * (n - 1))
         i = max(0, min(n - 1, i))
         self.hover = i
         self.update()
         QToolTip.showText(e.globalPosition().toPoint(), tr(
-            f"Mão {i + 1}: erro {self.errors[i]:.1f} pts<br>Média até aqui: <b>{self.avg[i]:.1f}</b>",
-            f"Hand {i + 1}: error {self.errors[i]:.1f} pts<br>Average so far: <b>{self.avg[i]:.1f}</b>"), self)
+            f"Decisão {i + 1}: {self.values[i]:.0f} pontos<br>Média das últimas {WINDOW}: <b>{self.avg[i]:.0f}</b>",
+            f"Decision {i + 1}: {self.values[i]:.0f} points<br>Average of the last {WINDOW}: <b>{self.avg[i]:.0f}</b>"),
+            self)
 
     def leaveEvent(self, _e) -> None:
         self.hover = None
@@ -199,6 +198,7 @@ def _item(text: str, align=Qt.AlignCenter, color: str | None = None) -> QTableWi
 class StatsPage(QWidget):
     reviewRequested = Signal(dict)   # entrada do histórico
     focusRequested = Signal(str)     # tipo de mão
+    closeRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -222,6 +222,10 @@ class StatsPage(QWidget):
                 self.filter.addItem(m.title, m.key)
         self.filter.currentIndexChanged.connect(self.refresh)
         head.addWidget(self.filter)
+        head.addSpacing(8)
+        from pokertrainer.gui.pages import close_button
+        self.close_btn = close_button(self.closeRequested.emit)
+        head.addWidget(self.close_btn)
         v.addLayout(head)
         self.tabs = QTabWidget()
         train = QWidget()
@@ -232,23 +236,22 @@ class StatsPage(QWidget):
 
         tiles = QHBoxLayout()
         tiles.setSpacing(10)
-        self.t_hands = _tile(tr("mãos jogadas", "hands played"))
-        self.t_err = _tile(tr("erro médio (pts)", "average error (pts)"))
-        self.t_bias = _tile(tr("tendência", "tendency"))
-        self.t_hits = _tile(tr("acertos", "hits"))
-        self.t_dec = _tile(tr("decisões certas (pot odds)", "right decisions (pot odds)"))
-        self.t_ev = _tile(tr("EV total das decisões", "total EV of decisions"))
-        for f, _ in (self.t_hands, self.t_err, self.t_bias, self.t_hits, self.t_dec, self.t_ev):
+        self.t_hands = _tile(tr("decisões", "decisions"))
+        self.t_best = _tile(tr("melhor jogada", "best play"))
+        self.t_good = _tile(tr("sem erro (melhor ou aceitável)", "no mistake (best or acceptable)"))
+        self.t_pts = _tile(tr("pontos por decisão", "points per decision"))
+        self.t_ev = _tile(tr("EV ao pagar apostas (bb)", "EV when calling bets (bb)"))
+        for f, _ in (self.t_hands, self.t_best, self.t_good, self.t_pts, self.t_ev):
             tiles.addWidget(f, 1)
         v.addLayout(tiles)
 
-        self.chart = ErrorChart()
+        self.chart = ScoreChart()
         v.addWidget(self.chart, 2)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         left_head = QHBoxLayout()
-        lt = QLabel(tr("ERRO POR TIPO DE MÃO", "ERROR BY HAND TYPE"))
+        lt = QLabel(tr("ACERTO POR TIPO DE MÃO", "ACCURACY BY HAND TYPE"))
         lt.setObjectName("section")
         left_head.addWidget(lt)
         left_head.addStretch(1)
@@ -258,8 +261,8 @@ class StatsPage(QWidget):
         self.focus_btn.clicked.connect(self._focus_weakest)
         left_head.addWidget(self.focus_btn)
         grid.addLayout(left_head, 0, 0)
-        self.types = _table([tr("Tipo de mão", "Hand type"), tr("Mãos", "Hands"), tr("Erro médio", "Avg error"),
-                             tr("Tendência", "Tendency")])
+        self.types = _table([tr("Tipo de mão", "Hand type"), tr("Decisões", "Decisions"),
+                             tr("Melhor jogada", "Best play"), tr("Erros", "Mistakes")])
         self.types.setToolTip(tr("Dê dois cliques para treinar só esse tipo de mão.",
                                  "Double-click to train only this hand type."))
         self.types.cellDoubleClicked.connect(self._focus_row)
@@ -276,8 +279,8 @@ class StatsPage(QWidget):
         self.review_btn.clicked.connect(self._review_selected)
         right_head.addWidget(self.review_btn)
         grid.addLayout(right_head, 0, 1)
-        self.hist = _table([tr("Mão", "Hand"), tr("Modo", "Mode"), tr("Palpite", "Guess"), tr("Real", "Actual"),
-                            tr("Erro", "Error")])
+        self.hist = _table([tr("Mão", "Hand"), tr("Modo", "Mode"), tr("Sua jogada", "Your play"),
+                            tr("Melhor", "Best"), tr("Chance", "Chance"), tr("Pts", "Pts")])
         self.hist.setToolTip(tr("Dê dois cliques para rever a mão na mesa.", "Double-click to review the hand."))
         self.hist.cellDoubleClicked.connect(lambda r, _c: self._review_row(r))
         grid.addWidget(self.hist, 1, 1)
@@ -285,74 +288,72 @@ class StatsPage(QWidget):
         grid.setColumnStretch(1, 1)
         v.addLayout(grid, 3)
         self.play_tab = PlayStatsTab()
-        self.tabs.addTab(train, tr("Treino", "Training"))
-        self.tabs.addTab(self.play_tab, tr("Jogo simulado", "Simulated game"))
+        self.tabs.addTab(train, tr("Treino de decisões", "Decision training"))
+        self.tabs.addTab(self.play_tab, tr("Cash game e torneio", "Cash game and tournament"))
         self.tabs.currentChanged.connect(lambda i: self.filter.setVisible(i == 0))
         outer_v.addWidget(self.tabs, 1)
         self._rows: list[dict] = []
         self._type_keys: list[str] = []
 
     # ------------------------------------------------------------ dados
+    def _history(self) -> list[dict]:
+        key = self.filter.currentData()
+        return [h for h in S.load_history() if "spot" in h and (not key or h.get("mode") == key)]
+
     def refresh(self) -> None:
         self.play_tab.refresh()
-        key = self.filter.currentData()
-        hist = [h for h in S.load_history() if not key or h.get("mode") == key]
+        hist = self._history()
         n = len(hist)
-        errs = [h["err"] for h in hist]
-        bias = sum(h["guess"] - h["eq"] * 100 for h in hist) / n if n else 0.0
+        pts = [h["pts"] for h in hist]
         self.t_hands[1].setText(str(n))
-        self.t_err[1].setText(f"{sum(errs) / n:.1f}" if n else "–")
-        if n:
-            word = (tr("superestima", "overestimates") if bias > 1 else
-                    tr("subestima", "underestimates") if bias < -1 else tr("equilibrado", "balanced"))
-            self.t_bias[1].setText(f"{bias:+.1f} {word}" if abs(bias) > 1 else word)
-        else:
-            self.t_bias[1].setText("–")
-        tol = S.get("tolerance")
-        self.t_hits[1].setText(f"{sum(e <= tol for e in errs) / n:.0%}" if n else "–")
-        dec = [h for h in hist if h.get("called") is not None]
-        self.t_dec[1].setText(f"{sum(bool(h.get('good')) for h in dec) / len(dec):.0%}" if dec else "–")
-        self.t_ev[1].setText(f"{sum(h.get('ev', 0.0) for h in dec):+.0f}" if dec else "–")
-        self.chart.set_data(errs[-200:])
+        self.t_best[1].setText(f"{sum(h['q'] == 'best' for h in hist) / n:.0%}" if n else "–")
+        self.t_good[1].setText(f"{sum(h['q'] != 'mistake' for h in hist) / n:.0%}" if n else "–")
+        self.t_pts[1].setText(f"{sum(pts) / n:.0f}" if n else "–")
+        faced = [h for h in hist if h["spot"][2] > 0 and h.get("act") == D.CALL]
+        ev = sum(D.Spot.from_list(h["spot"]).ev_call(h["eq"]) for h in faced)
+        self.t_ev[1].setText(f"{ev / D.BB:+.1f}".replace(".", tr(",", ".")) if faced else "–")
+        self.chart.set_data([float(x) for x in pts[-200:]])
 
         # por tipo de mão, pior primeiro
         groups: dict[str, list[dict]] = {}
         for h in hist:
             groups.setdefault(h.get("type", ""), []).append(h)
         rows = sorted(((k, g) for k, g in groups.items() if k),
-                      key=lambda kg: -sum(x["err"] for x in kg[1]) / len(kg[1]))
+                      key=lambda kg: sum(x["pts"] for x in kg[1]) / len(kg[1]))
         self._type_keys = [k for k, _ in rows]
         self.types.setRowCount(len(rows))
         for r, (k, g) in enumerate(rows):
-            e = sum(x["err"] for x in g) / len(g)
-            b = sum(x["guess"] - x["eq"] * 100 for x in g) / len(g)
+            best = sum(x["q"] == "best" for x in g) / len(g)
+            bad = sum(x["q"] == "mistake" for x in g)
             self.types.setItem(r, 0, _item(coach.hand_type_name(k), Qt.AlignLeft))
             self.types.setItem(r, 1, _item(str(len(g))))
-            self.types.setItem(r, 2, _item(f"{e:.1f}", color="#ff8a80" if e > 2 * tol else None))
-            self.types.setItem(r, 3, _item(f"{b:+.1f}" + (" ▲" if b > 1 else " ▼" if b < -1 else "")))
+            self.types.setItem(r, 2, _item(f"{best:.0%}", color="#ff8a80" if best < 0.5 else None))
+            self.types.setItem(r, 3, _item(str(bad)))
         self.focus_btn.setEnabled(any(len(g) >= MIN_FOR_FOCUS for _, g in rows))
 
         # histórico, mais recente primeiro
         self._rows = list(reversed(hist[-100:]))
         self.hist.setRowCount(len(self._rows))
+        colors = {"best": "#3ddc84", "ok": "#f5c542", "mistake": "#ff8a80"}
         for r, h in enumerate(self._rows):
             board = h["board"][:h["vis"]]
             hand = cards_text(h["hero"]) + ("   |   " + cards_text(board) if board else "")
             self.hist.setItem(r, 0, _item(hand, Qt.AlignLeft))
             self.hist.setItem(r, 1, _item(mode_name(h["mode"])))
-            self.hist.setItem(r, 2, _item(f"{h['guess']}%"))
-            self.hist.setItem(r, 3, _item(f"{h['eq'] * 100:.1f}%"))
-            self.hist.setItem(r, 4, _item(f"{h['err']:.1f}", color="#ff8a80" if h["err"] > 2 * tol else None))
+            self.hist.setItem(r, 2, _item(D.action_name(h["act"]) if h.get("act") else "–",
+                                          color=colors.get(h.get("q"))))
+            self.hist.setItem(r, 3, _item(D.action_name(h["best"])))
+            self.hist.setItem(r, 4, _item(f"{h['eq'] * 100:.0f}%"))
+            self.hist.setItem(r, 5, _item(str(h["pts"])))
         self.review_btn.setEnabled(bool(self._rows))
 
     def weakest_type(self) -> str | None:
-        key = self.filter.currentData()
-        groups: dict[str, list[float]] = {}
-        for h in S.load_history():
-            if (not key or h.get("mode") == key) and h.get("type"):
-                groups.setdefault(h["type"], []).append(h["err"])
+        groups: dict[str, list[int]] = {}
+        for h in self._history():
+            if h.get("type"):
+                groups.setdefault(h["type"], []).append(h["pts"])
         cand = [(sum(v) / len(v), k) for k, v in groups.items() if len(v) >= MIN_FOR_FOCUS]
-        return max(cand)[1] if cand else None
+        return min(cand)[1] if cand else None
 
     # ------------------------------------------------------------ ações
     def _focus_weakest(self) -> None:
@@ -423,8 +424,8 @@ class ProfitChart(QWidget):
         p.drawText(QRectF(r.left(), 2, r.width(), 18), Qt.AlignLeft | Qt.AlignVCenter,
                    tr("Lucro acumulado (big blinds)", "Cumulative profit (big blinds)"))
         if not self.cum:
-            p.drawText(r, Qt.AlignCenter, tr("Jogue algumas mãos no modo Jogar para ver sua curva.",
-                                             "Play a few hands in Play mode to see your curve."))
+            p.drawText(r, Qt.AlignCenter, tr("Jogue algumas mãos no cash game ou no torneio para ver sua curva.",
+                                             "Play a few hands in a cash game or tournament to see your curve."))
             return
         lo, hi, step = self._range()
         v = lo
@@ -474,7 +475,7 @@ class ProfitChart(QWidget):
 
 
 class PlayStatsTab(QWidget):
-    """Seu perfil de jogador acumulado em todas as partidas do modo Jogar."""
+    """Seu perfil de jogador acumulado em todas as partidas de cash game e torneio."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -508,9 +509,24 @@ class PlayStatsTab(QWidget):
         left.addWidget(self.advice)
         row.addLayout(left, 1)
         right = QVBoxLayout()
+        head = QHBoxLayout()
         lt = QLabel(tr("SEU PERFIL (TODAS AS PARTIDAS)", "YOUR PROFILE (ALL GAMES)"))
         lt.setObjectName("section")
-        right.addWidget(lt)
+        head.addWidget(lt)
+        head.addStretch(1)
+        self.export_btn = QPushButton(tr("⤓  Exportar mãos (PokerStars)", "⤓  Export hands (PokerStars)"))
+        self.export_btn.setObjectName("chip")
+        self.export_btn.setCursor(Qt.PointingHandCursor)
+        self.export_btn.setToolTip(tr("Salva o histórico das suas mãos no formato do PokerStars, para revisar em "
+                                      "outras ferramentas.",
+                                      "Saves your hand history in PokerStars format, to review in other tools."))
+        self.export_btn.clicked.connect(self._export)
+        head.addWidget(self.export_btn)
+        right.addLayout(head)
+        self.export_info = QLabel("")
+        self.export_info.setObjectName("muted")
+        self.export_info.setStyleSheet("font-size: 11px;")
+        right.addWidget(self.export_info)
         self.table = _table([tr("Estatística", "Stat"), tr("Você", "You"), tr("Referência", "Reference"),
                              tr("Avaliação", "Verdict")])
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -525,6 +541,23 @@ class PlayStatsTab(QWidget):
         right.addWidget(note)
         row.addLayout(right, 1)
         v.addLayout(row, 1)
+
+    def _export(self, path: str | None = None) -> None:
+        from pokertrainer import handhistory as HH
+        src = HH.history_path()
+        if not src.exists():
+            self.export_info.setText(tr("Ainda não há mãos jogadas.", "No hands played yet."))
+            return
+        if path is None:
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getSaveFileName(self, tr("Exportar mãos", "Export hands"),
+                                                  str(Path.home() / "pro-poker-trainer-maos.txt"),
+                                                  tr("Texto (*.txt)", "Text (*.txt)"))
+            if not path:
+                return
+        Path(path).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        self.export_info.setText(tr(f"{HH.count_hands()} mãos exportadas para {path}",
+                                    f"{HH.count_hands()} hands exported to {path}"))
 
     def refresh(self) -> None:
         d = S.load_play_stats()

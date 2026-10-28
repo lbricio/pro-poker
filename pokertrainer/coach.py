@@ -1,11 +1,10 @@
-"""Avaliação do palpite, explicações didáticas e tabelas de referência."""
+"""Explicações didáticas, faixas de mãos, tipos de mão e tabelas de referência."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from functools import lru_cache
-from math import ceil, comb, floor
+from math import comb
 from pathlib import Path
 
 from pokertrainer import engine as E
@@ -50,27 +49,6 @@ CATEGORY_EXAMPLE = [
 ]
 
 
-@dataclass
-class Rating:
-    label: str
-    color: str
-    points: int
-    hit: bool
-
-
-def rate(error_pp: float, tolerance: float) -> Rating:
-    """Nota do palpite a partir do erro em pontos percentuais."""
-    tol = max(tolerance, 0.5)
-    points = max(0, round(100 - 100 * error_pp / (4 * tol)))
-    if error_pp <= tol * 0.4:
-        return Rating(tr("Na mosca!", "Bullseye!"), "#3ddc84", points, True)
-    if error_pp <= tol:
-        return Rating(tr("Acertou", "Got it"), "#8fe36b", points, True)
-    if error_pp <= 2 * tol:
-        return Rating(tr("Perto", "Close"), "#f5c542", points, False)
-    return Rating(tr("Longe", "Way off"), "#ff6b6b", points, False)
-
-
 # ---------------------------------------------------------------- tabelas
 
 @lru_cache(maxsize=1)
@@ -96,34 +74,6 @@ def preflop_rank(label: str, n_opp: int) -> int | None:
         return None
     order = sorted(t[n_opp], key=t[n_opp].get, reverse=True)
     return order.index(label) + 1
-
-
-@dataclass
-class Scenario:
-    """Escala da barra para um modo + número de oponentes."""
-    lo: int                 # pior chance possível (%), arredondada para baixo
-    hi: int                 # melhor chance possível (%), arredondada para cima
-    fair: float             # chance média (%) = 100 / jogadores
-    hist: list[float]       # frequência de cada faixa de 1 ponto (0..99)
-    best: str | None = None
-    worst: str | None = None
-
-
-@lru_cache(maxsize=1)
-def _scenarios() -> dict | None:
-    f = ASSETS / "scenarios.json"
-    return json.loads(f.read_text()) if f.exists() else None
-
-
-def scenario(mode_key: str, n_opp: int) -> Scenario:
-    fair = 100 / (n_opp + 1)
-    data = _scenarios()
-    sc = data.get(mode_key, {}).get(str(n_opp)) if data else None
-    if not sc:
-        return Scenario(0, 100, fair, [])
-    lo = max(0, floor(sc["min"] * 100))
-    hi = min(100, ceil(sc["max"] * 100 - 1e-9))
-    return Scenario(lo, hi, fair, sc["hist"], sc.get("best"), sc.get("worst"))
 
 
 def hit_chance(outs: int, unseen: int, cards_to_come: int) -> float:
@@ -153,66 +103,6 @@ def street(n: int) -> str:
 
 def _hand_at(hole: list[int], board: list[int]) -> int | None:
     return E.evaluate(hole + board) if len(board) >= 3 else None
-
-
-def guess_feedback(d: E.Deal, eq: E.EquityResult, n_opp: int, guess: int, tolerance: float,
-                   range_pct: int = 100) -> list[str]:
-    """Comentários sobre o palpite: direção do erro e um atalho para estimar melhor esta mão."""
-    real = eq.equity * 100
-    diff = guess - real
-    fair = 100 / (n_opp + 1)
-    tips = []
-    if abs(diff) <= tolerance:
-        tips.append(tr(f"Boa leitura: você errou só {abs(diff):.1f} pontos.",
-                       f"Good read: you were off by only {abs(diff):.1f} points."))
-    else:
-        word = tr("superestimou", "overestimated") if diff > 0 else tr("subestimou", "underestimated")
-        tips.append(tr(f"Você <b>{word}</b> a mão em {abs(diff):.0f} pontos ({guess}% contra {real:.0f}% reais).",
-                       f"You <b>{word}</b> the hand by {abs(diff):.0f} points ({guess}% vs. {real:.0f}% actual)."))
-    if range_pct < 100:
-        tips.append(tr(f"Contra uma faixa (top {range_pct}%), parta da chance contra mãos aleatórias e desconte: "
-                       "quanto mais forte a faixa, mais as mãos médias perdem valor.",
-                       f"Against a range (top {range_pct}%), start from the chance against random hands and "
-                       "discount: the stronger the range, the more average hands lose value."))
-    if d.visible == 0 and range_pct >= 100:
-        label = E.starting_hand_label(*d.hero)
-        hu = preflop_equity(label, 1)
-        if hu is not None and n_opp > 1:
-            tips.append(tr(f"Atalho: {label} tem ~{hu:.0%} contra 1 oponente; com {n_opp} oponentes a fatia justa "
-                           f"cai para {fair:.0f}% e a mão perde valor junto.",
-                           f"Shortcut: {label} has ~{hu:.0%} against 1 opponent; with {n_opp} opponents the fair "
-                           f"share drops to {fair:.0f}% and the hand loses value with it."))
-        elif hu is not None:
-            tips.append(tr(f"Atalho: compare com as referências — AA 85%, AK 65–67%, 22 50%, 32o 32%. "
-                           f"{label} fica em {hu:.0%}.",
-                           f"Shortcut: compare with the benchmarks — AA 85%, AK 65–67%, 22 50%, 32o 32%. "
-                           f"{label} sits at {hu:.0%}."))
-        if diff > tolerance and n_opp >= 2:
-            tips.append(tr("Erro comum: esquecer que cada oponente a mais pode ter uma mão melhor que a sua.",
-                           "Common mistake: forgetting that every extra opponent may hold a better hand than yours."))
-    elif d.visible > 0:
-        board = d.visible_board
-        o = E.outs(d.hero, board)
-        n = len({c for cs in o.values() for c in cs})
-        cur = E.evaluate(d.hero + board) >> 20
-        if cur >= E.TWO_PAIR and diff < -tolerance:
-            cn = E.category_name(cur).lower()
-            tips.append(tr(f"Você já tinha {cn} — mãos feitas assim costumam estar na frente; "
-                           "não precisa de mais cartas para vencer.",
-                           f"You already had {cn} — made hands like this are usually ahead; "
-                           "you don't need more cards to win."))
-        elif cur <= E.PAIR and n and diff > tolerance:
-            mult = 4 if d.visible == 3 else 2
-            tips.append(tr(f"Para mãos que dependem de melhorar, comece pelos outs: {n} × {mult} ≈ {n * mult}% de "
-                           "melhorar — e nem toda melhora vence.",
-                           f"For hands that need to improve, start with the outs: {n} × {mult} ≈ {n * mult}% to "
-                           "improve — and not every improvement wins."))
-        elif cur == E.HIGH and not n:
-            tips.append(tr("Só carta alta e quase nada para melhorar: a chance fica bem abaixo da fatia justa "
-                           f"({fair:.0f}%).",
-                           "Just high card and almost nothing to improve: the chance is well below the fair share "
-                           f"({fair:.0f}%)."))
-    return tips
 
 
 def runout_story(d: E.Deal, eq: E.EquityResult, hero_score: int, opp_scores: list[int]) -> list[str]:
@@ -254,7 +144,7 @@ def runout_story(d: E.Deal, eq: E.EquityResult, hero_score: int, opp_scores: lis
         if turned is not None and turned > max(3, d.visible):
             when = tr(f" — ele passou à sua frente {street(turned)}", f" — they took the lead {street(turned)}")
         elif turned is not None and d.visible >= 3:
-            when = tr(" — ele já estava na frente quando você palpitou", " — they were already ahead when you guessed")
+            when = tr(" — ele já estava na frente quando você decidiu", " — they were already ahead when you decided")
         tips.append(tr(f"Oponente {w + 1} venceu com {E.describe(best).lower()}{when}.",
                        f"Opponent {w + 1} won with {E.describe(best).lower()}{when}."))
 
@@ -369,10 +259,13 @@ def explain(d: E.Deal, eq: E.EquityResult, n_opp: int) -> list[str]:
 
 # ---------------------------------------------------------------- faixas de mãos (ranges)
 
-RANGES = [100, 50, 30, 15, 8]   # % das mãos iniciais que os oponentes jogam (100 = qualquer mão)
+RANGES = [0, 100, 50, 30, 15, 8]   # 0 = conforme a ação (realista); senão, top X% fixo (100 = qualquer mão)
 
 
 def range_name(pct: int, short: bool = False) -> str:
+    if pct <= 0:
+        return tr("Pela ação", "By action") if short else tr("Conforme a ação (realista)",
+                                                               "Based on their action (realistic)")
     if pct >= 100:
         return tr("Qualquer mão", "Any hand") if short else tr("Qualquer mão (aleatória)", "Any hand (random)")
     if short:
@@ -459,71 +352,6 @@ def hand_type(d: E.Deal) -> str:
         return "pp_pair"
     n_outs = len({c for cs in E.outs(d.hero, board).values() for c in cs})
     return "pp_draw" if n_outs >= 8 else "pp_weak"
-
-
-# ---------------------------------------------------------------- pot odds
-
-@dataclass
-class PotSpot:
-    pot: int        # pote antes da aposta
-    bet: int        # aposta do oponente 1 (os demais pagam o mesmo)
-    callers: int    # oponentes que já pagaram depois da aposta
-
-    @property
-    def to_call(self) -> int:
-        return self.bet
-
-    @property
-    def final_pot(self) -> int:
-        """Pote se você pagar."""
-        return self.pot + self.bet * (1 + self.callers) + self.bet
-
-    @property
-    def need(self) -> float:
-        """Chance mínima de vencer para pagar valer a pena (0..1)."""
-        return self.to_call / self.final_pot
-
-    def ev_call(self, equity: float) -> float:
-        return equity * self.final_pot - self.to_call
-
-    def to_list(self) -> list[int]:
-        return [self.pot, self.bet, self.callers]
-
-
-BET_SIZES = [0.25, 0.33, 0.5, 0.66, 0.75, 1.0, 1.5]
-
-
-def make_spot(rng, n_opp: int) -> PotSpot:
-    pot = rng.choice(range(40, 401, 20))
-    frac = rng.choice(BET_SIZES)
-    bet = max(5, int(round(pot * frac / 5)) * 5)
-    return PotSpot(pot, bet, n_opp - 1)
-
-
-def decision_tips(spot: PotSpot, eq: float, called: bool) -> list[str]:
-    need = spot.need
-    ev = spot.ev_call(eq)
-    tips = [tr(f"Pagar {spot.to_call} para um pote final de {spot.final_pot}: você precisa vencer "
-               f"<b>{spot.to_call} ÷ {spot.final_pot} = {need:.0%}</b> das vezes.",
-               f"Calling {spot.to_call} into a final pot of {spot.final_pot}: you need to win "
-               f"<b>{spot.to_call} ÷ {spot.final_pot} = {need:.0%}</b> of the time.")]
-    good = (eq >= need) == called or abs(eq - need) < 0.01
-    verdict = tr("pagar", "calling") if eq >= need else tr("desistir", "folding")
-    tips.append(tr(f"Sua chance real era {eq:.0%}, então o certo era <b>{verdict}</b>. "
-                   f"Pagar vale em média <b>{ev:+.0f} fichas</b> por mão (desistir vale 0).",
-                   f"Your actual chance was {eq:.0%}, so the right play was <b>{verdict}</b>. "
-                   f"Calling is worth <b>{ev:+.0f} chips</b> per hand on average (folding is worth 0)."))
-    if not good:
-        tips.append(tr("Atalho: aposta de meio pote pede ~25%; pote inteiro, ~33%; 1/3 do pote, ~20% "
-                       "(contra 1 oponente).",
-                       "Shortcut: a half-pot bet needs ~25%; a pot-sized bet, ~33%; a third of the pot, ~20% "
-                       "(heads-up)."))
-    if spot.callers:
-        tips.append(tr(f"Com {spot.callers} oponente(s) que já pagaram, o pote cresce e o preço fica melhor — "
-                       "mas sua chance também cai, porque há mais mãos para vencer.",
-                       f"With {spot.callers} opponent(s) already calling, the pot grows and the price improves — "
-                       "but your chance drops too, because there are more hands to beat."))
-    return tips
 
 
 def range_tips(d: E.Deal, eq: E.EquityResult, pct: int) -> list[str]:

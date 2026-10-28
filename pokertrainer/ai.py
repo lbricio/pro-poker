@@ -427,11 +427,26 @@ class Bot:
         return gate * drive
 
     def bust_fear(self, t, seat: int) -> float:
-        """Medo de quebrar (0..1): cresce quando o stack fica abaixo de ~25 big blinds, conforme o estilo."""
+        """Medo de quebrar (0..1): cresce quando o stack fica abaixo de ~25 big blinds, conforme o estilo. Na bolha
+        do torneio, quem tem stack médio ou curto também se protege (os habilidosos sabem que sobreviver vale mais
+        que fichas); os stacks grandes, ao contrário, pressionam."""
         me = t.players[seat]
         stack_bb = (me.stack + me.bet) / max(1, t.bb)
         danger = _clamp((25 - stack_bb) / 20)
-        return self.p.survival * danger
+        fear = self.p.survival * danger
+        if getattr(t, "bubble", False):
+            alive = [p.stack + p.bet for p in t.players if not p.sitting_out and p.stack + p.bet > 0]
+            avg = sum(alive) / max(1, len(alive))
+            if me.stack + me.bet <= avg * 1.1:
+                fear = max(fear, _clamp(0.25 + 0.5 * self.p.eff_skill))
+        return fear
+
+    @staticmethod
+    def in_position(t, seat: int) -> bool:
+        """Age por último entre quem ainda está na mão (depois do flop)?"""
+        n = len(t.players)
+        live = t.seats_in_hand()
+        return bool(live) and max(live, key=lambda i: (i - t.dealer - 1) % n) == seat
 
     def short_targets(self, t, seat: int) -> list:
         """Adversários na mão com poucas fichas que este bot cobre com folga (candidatos a eliminação)."""
@@ -689,6 +704,7 @@ class Bot:
         pct = int(max(10, min(100, round(vpip * 100 / 5) * 5)))
         iters = 800
         cls = self.hand_class(me.hole, t.board)
+        ip = self.in_position(t, seat) if CHAMPION_POSITION else None   # None = ignora a posição
 
         if lg.can_check:
             frac = r.choices([0.33, 0.66, 1.0], weights=[0.4, 0.4, 0.2])[0]
@@ -697,8 +713,8 @@ class Bot:
             # chance contra quem pagaria essa aposta (faixa de pagamento equilibrada)
             call_w = (1.0, 0.9 - 0.15 * frac, 0.45 - 0.25 * frac, 0.6, 0.06)
             eq_c, _cont = self.weighted_equity(t, seat, pct, call_w, iters)
-            multi = 1.0 / n_opp            # blefar contra muitos jogadores é caro
-            if eq_c >= 0.5:
+            multi = (1.0 if ip is None else 1.4 if ip else 0.75) / n_opp   # blefar contra muitos é caro
+            if eq_c >= (0.5 if ip is None else 0.48 if ip else 0.52):
                 if r.random() < 0.15:      # protege a linha de "passar" com algumas mãos fortes
                     return Decision("check", reason="trap")
                 return Decision("allin" if b >= stack_now else "raise", t.current_bet + b, "value")
@@ -723,6 +739,8 @@ class Bot:
         bet_w = (0.95, 0.8 - 0.15 * min(size, 1.5), 0.35 - 0.15 * min(size, 1.5), 0.55, _clamp(bluff_w, 0.02, 0.7))
         eq_call, _ = self.weighted_equity(t, seat, pct, bet_w, iters)
         need = to_call / (pot + to_call)
+        if ip is False and len(t.board) < 5:
+            need += 0.02                    # fora de posição realiza um pouco menos da chance
         if lg.can_raise and eq_call >= 0.68:
             raise_to = min(int(t.current_bet * 2.7 + 0.3 * pot), lg.max_raise_to)
             return Decision("allin" if raise_to >= lg.max_raise_to else "raise", raise_to, "value")
@@ -759,6 +777,11 @@ class Bot:
             if hero_fr is not None and any(t.players[i].is_hero for i in t.seats_in_hand()):
                 fold_rate = (fold_rate + hero_fr) / 2
         bluff = _clamp(bluff * ((1 - sk) + sk * (0.2 + 1.8 * fold_rate)))
+        # posição: quem age por último vê o que os outros fizeram — blefa e aposta mais; fora de posição, menos
+        ip = self.in_position(t, seat)
+        pw = POSITION_WEIGHT
+        bluff = _clamp(bluff * (1 + 0.45 * sk * pw if ip else 1 - 0.3 * sk * pw))
+        aggr = _clamp(aggr + (0.06 if ip else -0.04) * sk * pw)
         value_shift = sk * 0.18 * (0.5 - fold_rate)          # contra quem paga tudo, aposta mais mãos médias
         call_shift = sk * 0.10 * (field_aggr - 0.4)          # contra agressivos, paga um pouco mais
 
@@ -920,10 +943,10 @@ class Bot:
             for k in ("aggr_sd", "bluffs", "values", "sd", "sd_strength"):
                 setattr(rd, k, getattr(rd, k) * pr.memory)
         notes = []
-        me = t.players[seat]
         in_sd = seat in t.showdown_hands
+        shown = set(getattr(t, "shown", t.showdown_hands))
         for i, sc in t.showdown_hands.items():
-            if i == seat:
+            if i == seat or i not in shown:   # quem descartou não mostrou nada
                 continue
             target = t.players[i]
             # quem estava na mão presta atenção; os outros, só às vezes (amadores se distraem)
@@ -1031,10 +1054,23 @@ def chat(kind: str, pers: Personality, rng: random.Random) -> str | None:
     return tr(*rng.choice(_LINES[kind]))
 
 
-# estrutura de blinds do torneio (sobe a cada HANDS_PER_LEVEL mãos)
-BLIND_LEVELS = [(5, 10), (10, 20), (15, 30), (25, 50), (50, 100), (75, 150), (100, 200), (150, 300), (200, 400),
-                (300, 600), (500, 1000), (800, 1600)]
-HANDS_PER_LEVEL = 10
+POSITION_WEIGHT = 1.0   # quanto a posição pesa nas decisões depois do flop (0 = ignora)
+CHAMPION_POSITION = False   # o Campeão ajusta blefes/valor à posição (medido em simulação antes de ligar)
+
+
+# estrutura de blinds do torneio: (small, big, ante do big blind); sobe a cada HANDS_PER_LEVEL mãos do torneio
+BLIND_LEVELS = [(5, 10, 0), (10, 20, 0), (15, 30, 30), (20, 40, 40), (25, 50, 50), (30, 60, 60), (40, 80, 80),
+                (50, 100, 100), (60, 120, 120), (80, 160, 160), (100, 200, 200), (125, 250, 250), (150, 300, 300),
+                (200, 400, 400), (250, 500, 500), (300, 600, 600), (400, 800, 800), (500, 1000, 1000),
+                (600, 1200, 1200), (800, 1600, 1600), (1000, 2000, 2000), (1500, 3000, 3000), (2000, 4000, 4000)]
+HANDS_PER_LEVEL = 15
+
+
+def blinds_for(hands_played: int) -> tuple[int, int, int, int]:
+    """(sb, bb, ante, mãos até subir) no torneio, pelo número de mãos já jogadas no torneio inteiro."""
+    lvl = min(len(BLIND_LEVELS) - 1, hands_played // HANDS_PER_LEVEL)
+    left = HANDS_PER_LEVEL - hands_played % HANDS_PER_LEVEL if lvl < len(BLIND_LEVELS) - 1 else 0
+    return (*BLIND_LEVELS[lvl], left)
 
 
 # rodadas do torneio por dificuldade (a última é a mesa final)
@@ -1050,8 +1086,3 @@ def round_qualifiers(n_players: int, final: bool) -> int:
     return 1 if final else max(1, n_players // 2)
 
 
-def blinds_for(hands_played: int) -> tuple[int, int, int]:
-    """(sb, bb, mãos até subir) no torneio."""
-    lvl = min(len(BLIND_LEVELS) - 1, hands_played // HANDS_PER_LEVEL)
-    left = HANDS_PER_LEVEL - hands_played % HANDS_PER_LEVEL if lvl < len(BLIND_LEVELS) - 1 else 0
-    return (*BLIND_LEVELS[lvl], left)

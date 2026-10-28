@@ -1,4 +1,4 @@
-"""Componentes visuais: fundo borrado, carta animada, barra de palpite e painel translúcido."""
+"""Componentes visuais: fundo borrado, carta animada, medidor da decisão e painel translúcido."""
 
 from __future__ import annotations
 
@@ -7,10 +7,9 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Property, QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSequentialAnimationGroup, QPauseAnimation, Qt,
-    Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+    QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
@@ -276,9 +275,8 @@ class PillLabel(QWidget):
         self.label = QLabel()
         self.label.setWordWrap(lines > 1)
         self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet(f"QLabel {{ font-size: {font_px}px; color: {color}; font-weight: 600; "
-                                 "background: rgba(8,12,14,0.78); border: 1px solid rgba(255,255,255,0.10); "
-                                 "border-radius: 8px; padding: 2px 8px; }")
+        self._font_px, self._color = font_px, None
+        self.set_color(color)
         self.label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Maximum)
         h.addWidget(self.label, 0, Qt.AlignHCenter | Qt.AlignTop)
         self.setFixedHeight(self.label.fontMetrics().lineSpacing() * lines + 8)
@@ -287,13 +285,25 @@ class PillLabel(QWidget):
     def setText(self, text: str) -> None:
         self.label.setText(text)
         self.label.setVisible(bool(text.strip()))
-        if not self.label.wordWrap():
+        need = self.label.fontMetrics().horizontalAdvance(text) + 20
+        if self.label.wordWrap():
+            # quebra de linha só quando o texto não cabe numa linha
+            self.label.setMinimumWidth(min(need, self.label.maximumWidth()))
+        else:
             # linha única: largura certa para o texto (sem cortar), limitada à largura da etiqueta
-            need = self.label.fontMetrics().horizontalAdvance(text) + 20
             self.label.setFixedWidth(min(need, self.maximumWidth()) if self.maximumWidth() < 10000 else need)
 
     def text(self) -> str:
         return self.label.text()
+
+    def set_color(self, color: str) -> None:
+        """Cor do texto (ex.: verde para "passou")."""
+        if color == self._color:
+            return
+        self._color = color
+        self.label.setStyleSheet(f"QLabel {{ font-size: {self._font_px}px; color: {color}; font-weight: 600; "
+                                 "background: rgba(8,12,14,0.78); border: 1px solid rgba(255,255,255,0.10); "
+                                 "border-radius: 8px; padding: 2px 8px; }")
 
     def setFixedWidth(self, w: int) -> None:
         super().setFixedWidth(w)
@@ -424,250 +434,116 @@ class DeckButton(QPushButton):
         super().leaveEvent(e)
 
 
-# ---------------------------------------------------------------- barra de palpite
+# ---------------------------------------------------------------- medidor da decisão
 
-class GuessBar(QWidget):
-    """Barra arrastável de palpite, na escala do cenário (pior → melhor mão possível).
+class DecisionMeter(QWidget):
+    """Escala de 0 a 100% dividida nas faixas de cada jogada, com a sua chance marcada depois da decisão.
 
-    Mostra a chance média (fatia justa), um histograma de quão comum é cada chance e, depois da
-    revelação, a resposta certa.
+    Encarando aposta: desistir (abaixo das pot odds) · pagar · aumentar (acima do limite de valor).
+    Sem aposta: passar · apostar. Antes da decisão mostra só um trilho neutro com uma legenda.
     """
 
-    valueChanged = Signal(int)
-
-    HIST_TOP, HIST_H = 22, 34
-    TRACK_Y, TRACK_H = 60, 14
+    TRACK_Y, TRACK_H = 34, 16
+    ZONE_COLORS = {"fold": QColor(255, 107, 107), "check": QColor(150, 170, 165), "call": QColor(245, 197, 66),
+                   "bet": QColor(61, 220, 132), "raise": QColor(61, 220, 132)}
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._lo, self._hi, self._fair = 0, 100, 50.0
-        self._hist: list[float] = []
-        self._value = 50
-        self._answer: float | None = None
-        self._threshold: float | None = None
-        self._captions = True
-        self._locked = False
-        self._drag = False
-        self.setFixedHeight(122)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setCursor(Qt.PointingHandCursor)
+        self._zones: list[tuple[float, float, str, str]] = []   # (de, até, ação, rótulo)
+        self._marks: list[tuple[float, str]] = []               # limites com legenda
+        self._value: float | None = None
+        self._best: str | None = None
+        self._hint = ""
+        self.setFixedHeight(92)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setToolTip(tr("As barrinhas claras mostram quão comum é cada chance neste cenário;\n"
-                           "a linha dourada é a chance média (100% ÷ jogadores).",
-                           "The light bars show how common each chance is in this scenario;\n"
-                           "the gold line is the average chance (100% ÷ players)."))
 
-    # escala
-    def set_scale(self, lo: int, hi: int, fair: float, hist: list[float], captions: bool = True) -> None:
-        """`captions`: rotula os extremos como pior/melhor mão possível (só quando a escala é a do cenário)."""
-        self._lo, self._hi = int(lo), int(max(hi, lo + 1))
-        self._fair = fair
-        self._hist = hist
-        self._captions = captions
+    def clear(self, hint: str = "") -> None:
+        self._zones, self._marks, self._value, self._best, self._hint = [], [], None, None, hint
         self.update()
 
-    def set_threshold(self, pct: float | None) -> None:
-        """Linha da chance mínima para pagar uma aposta (pot odds)."""
-        self._threshold = pct
+    def set_result(self, zones: list[tuple[float, float, str, str]], marks: list[tuple[float, str]],
+                   value: float, best: str, caption: str | None = None) -> None:
+        """Zonas e marcas em 0..1; `value` = o ponteiro (sua chance); `best` = ação da melhor jogada."""
+        self._zones, self._marks, self._value, self._best, self._hint = zones, marks, value, best, ""
+        self._caption = caption
         self.update()
 
-    def value(self) -> int:
-        return self._value
-
-    def setValue(self, v: float) -> None:
-        v = max(self._lo, min(self._hi, int(round(v))))
-        if v != self._value:
-            self._value = v
-            self.valueChanged.emit(v)
-        self.update()
-
-    def set_answer(self, a: float | None) -> None:
-        self._answer = a
-        self._locked = a is not None
-        self.setCursor(Qt.ArrowCursor if self._locked else Qt.PointingHandCursor)
-        self.update()
-
-    # geometria
     def _track(self) -> QRectF:
-        m = 26
+        m = 18
         return QRectF(m, self.TRACK_Y, self.width() - 2 * m, self.TRACK_H)
 
     def _x(self, v: float) -> float:
         t = self._track()
-        return t.left() + (v - self._lo) / (self._hi - self._lo) * t.width()
+        return t.left() + max(0.0, min(1.0, v)) * t.width()
 
-    def _x_to_value(self, x: float) -> float:
-        t = self._track()
-        return self._lo + (x - t.left()) / t.width() * (self._hi - self._lo)
-
-    # interação
-    def mousePressEvent(self, e) -> None:
-        if self._locked or e.button() != Qt.LeftButton:
-            return
-        self._drag = True
-        self.setValue(self._x_to_value(e.position().x()))
-
-    def mouseMoveEvent(self, e) -> None:
-        if self._drag and not self._locked:
-            self.setValue(self._x_to_value(e.position().x()))
-
-    def mouseReleaseEvent(self, _e) -> None:
-        self._drag = False
-
-    def wheelEvent(self, e) -> None:
-        if not self._locked:
-            self.setValue(self._value + (1 if e.angleDelta().y() > 0 else -1))
-
-    def keyPressEvent(self, e) -> None:
-        if self._locked:
-            return super().keyPressEvent(e)
-        step = 5 if e.modifiers() & Qt.ShiftModifier else 1
-        if e.key() in (Qt.Key_Right, Qt.Key_Up):
-            self.setValue(self._value + step)
-        elif e.key() in (Qt.Key_Left, Qt.Key_Down):
-            self.setValue(self._value - step)
-        elif e.key() == Qt.Key_Home:
-            self.setValue(self._lo)
-        elif e.key() == Qt.Key_End:
-            self.setValue(self._hi)
-        else:
-            super().keyPressEvent(e)
-
-    # desenho
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         t = self._track()
         r = t.height() / 2
-        lo, hi = self._lo, self._hi
-        span = hi - lo
-
-        # histograma: quão comum é cada chance
-        if self._hist:
-            vals = [self._hist[b] if b < len(self._hist) else 0.0 for b in range(lo, hi)]
-            peak = max(vals) or 1.0
-            base = self.HIST_TOP + self.HIST_H
-            for b, h in zip(range(lo, hi), vals):
-                if h <= 0:
-                    continue
-                hh = max(1.5, (h / peak) ** 0.75 * self.HIST_H)
-                x0, x1 = self._x(b), self._x(b + 1)
-                p.fillRect(QRectF(x0 + 0.5, base - hh, max(1.0, x1 - x0 - 1), hh), QColor(255, 255, 255, 46))
-
-        # trilho: vermelho (pior) → amarelo (média) → verde (melhor)
-        f = min(0.95, max(0.05, (self._fair - lo) / span))
-        grad = QLinearGradient(t.topLeft(), t.topRight())
-        grad.setColorAt(0.0, QColor("#c0392b"))
-        grad.setColorAt(f, QColor("#e6b422"))
-        grad.setColorAt(1.0, QColor("#27ae60"))
         track = QPainterPath()
         track.addRoundedRect(t, r, r)
-        p.fillPath(track, QColor(255, 255, 255, 30))
-        p.save()
-        p.setClipPath(track)
-        p.setOpacity(0.35)
-        p.fillRect(t, QBrush(grad))
-        p.setOpacity(1.0)
-        gx = self._x(self._value)
-        p.fillRect(QRectF(t.left(), t.top(), gx - t.left(), t.height()), QBrush(grad))
-        p.restore()
-
-        # marcas e números
+        p.fillPath(track, QColor(255, 255, 255, 26))
         small = QFont(self.font())
-        small.setPointSizeF(max(8.0, small.pointSizeF() * 0.85))
-        p.setFont(small)
-        step = 1 if span <= 12 else 5 if span <= 60 else 10
-        label_every = step * (2 if span / step > 12 else 1)
-        first = -(-lo // step) * step
-        for v in range(first, hi + 1, step):
-            x = self._x(v)
-            major = v % label_every == 0
-            p.setPen(QPen(QColor(255, 255, 255, 150 if major else 80), 1))
-            p.drawLine(QPointF(x, t.bottom() + 4), QPointF(x, t.bottom() + (10 if major else 7)))
-            if major and abs(x - self._x(lo)) > 30 and abs(x - self._x(hi)) > 30:
-                p.setPen(QColor(255, 255, 255, 150))
-                p.drawText(QRectF(x - 30, t.bottom() + 12, 60, 16), Qt.AlignCenter, f"{v}%")
-        # extremos: pior e melhor mão possíveis
+        small.setPixelSize(11)
         bold = QFont(small)
         bold.setBold(True)
-        for v, cap, align in ((lo, tr("pior mão possível", "worst possible hand"), Qt.AlignLeft),
-                               (hi, tr("melhor mão possível", "best possible hand"), Qt.AlignRight)):
-            x = self._x(v)
-            box = QRectF(x - 4, t.bottom() + 12, 140, 16) if align == Qt.AlignLeft else QRectF(x - 136, t.bottom() + 12, 140, 16)
-            p.setFont(bold)
-            p.setPen(QColor("white"))
-            p.drawText(box, align | Qt.AlignVCenter, f"{v}%")
-            if self._captions:
-                p.setFont(small)
-                p.setPen(QColor(255, 255, 255, 120))
-                p.drawText(box.translated(0, 15), align | Qt.AlignVCenter, cap)
-
-        # chance mínima para pagar (pot odds)
-        if self._threshold is not None:
-            cyan = QColor("#5ec8ff")
-            tx = self._x(max(lo, min(hi, self._threshold)))
-            p.setPen(QPen(cyan, 2, Qt.DashDotLine))
-            p.drawLine(QPointF(tx, self.HIST_TOP - 6), QPointF(tx, t.bottom() + 3))
-            p.setFont(bold)
-            p.setPen(cyan)
-            label = tr(f"para pagar: {self._threshold:.0f}%", f"to call: {self._threshold:.0f}%")
-            lw = p.fontMetrics().horizontalAdvance(label) + 4
-            right_box = QRectF(tx + 6, 2, lw, 16)
-            left_box = QRectF(tx - 6 - lw, 2, lw, 16)
-            boxes = [right_box, left_box]
-            if self._answer is not None:
-                # não cobre o rótulo "Real: X%" (centralizado na resposta, 130 px)
-                ax = self._x(max(lo, min(hi, self._answer * 100)))
-                rx = min(max(ax - 65, 0), self.width() - 130)
-                real = QRectF(rx, 0, 130, 18)
-                boxes.sort(key=lambda b: b.intersects(real))
-                if boxes[0].intersects(real):
-                    boxes[0] = QRectF(tx - lw / 2, self.HIST_TOP + 2, lw, 16)
-            box = boxes[0]
-            box.moveLeft(max(0.0, min(box.left(), self.width() - lw)))
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(12, 18, 22, 210))
-            p.drawRoundedRect(box.adjusted(-4, -1, 4, 1), 6, 6)
-            p.setPen(cyan)
-            p.drawText(box, Qt.AlignCenter, label)
-
-        # chance média
-        fx = self._x(self._fair)
-        p.setPen(QPen(GOLD, 2, Qt.DashLine))
-        p.drawLine(QPointF(fx, self.HIST_TOP - 2), QPointF(fx, t.bottom() + 3))
+        # escala
+        p.setFont(small)
+        for v in range(0, 101, 10):
+            x = self._x(v / 100)
+            p.setPen(QPen(QColor(255, 255, 255, 70), 1))
+            p.drawLine(QPointF(x, t.bottom() + 3), QPointF(x, t.bottom() + 7))
+            if v % 20 == 0:
+                p.setPen(QColor(255, 255, 255, 110))
+                p.drawText(QRectF(x - 20, t.bottom() + 8, 40, 14), Qt.AlignCenter, f"{v}%")
+        if not self._zones:
+            p.setPen(QColor(255, 255, 255, 120))
+            p.drawText(QRectF(t.left(), 4, t.width(), 22), Qt.AlignCenter, self._hint)
+            return
+        # faixas de cada jogada (com 2 px de separação), rótulo dentro quando cabe
+        p.save()
+        p.setClipPath(track)
+        for a, b, act, label in self._zones:
+            x0, x1 = self._x(a), self._x(b)
+            col = QColor(self.ZONE_COLORS.get(act, QColor(200, 200, 200)))
+            col.setAlpha(150 if act == self._best else 70)
+            p.fillRect(QRectF(x0 + 1, t.top(), max(0.0, x1 - x0 - 2), t.height()), col)
+        p.restore()
         p.setFont(bold)
-        p.setPen(GOLD)
-        txt = tr(f"média {self._fair:.0f}%", f"average {self._fair:.0f}%")
-        p.drawText(QRectF(fx - 60, t.bottom() + 26, 120, 16), Qt.AlignCenter, txt)
-
-        # resposta certa
-        if self._answer is not None:
-            a = max(lo, min(hi, self._answer * 100))
-            ax = self._x(a)
-            band = QRectF(min(gx, ax), t.top() - 6, abs(ax - gx), t.height() + 12)
-            p.fillRect(band, QColor(255, 255, 255, 40))
+        for a, b, act, label in self._zones:
+            x0, x1 = self._x(a), self._x(b)
+            if x1 - x0 > p.fontMetrics().horizontalAdvance(label) + 10:
+                p.setPen(QColor(15, 20, 22) if act == self._best else QColor(255, 255, 255, 200))
+                p.drawText(QRectF(x0, t.top(), x1 - x0, t.height()), Qt.AlignCenter, label)
+        # limites (pot odds / valor)
+        p.setFont(small)
+        for v, label in self._marks:
+            x = self._x(v)
+            p.setPen(QPen(QColor(255, 255, 255, 170), 1, Qt.DashLine))
+            p.drawLine(QPointF(x, t.top() - 4), QPointF(x, t.bottom() + 4))
+            w = p.fontMetrics().horizontalAdvance(label) + 8
+            box = QRectF(min(max(x - w / 2, 0), self.width() - w), t.bottom() + 22, w, 14)
+            p.setPen(QColor(255, 255, 255, 190))
+            p.drawText(box, Qt.AlignCenter, label)
+        # sua chance
+        if self._value is not None:
+            x = self._x(self._value)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor("white"))
             tri = QPainterPath()
-            tri.moveTo(ax, t.top() - 2)
-            tri.lineTo(ax - 8, t.top() - 14)
-            tri.lineTo(ax + 8, t.top() - 14)
+            tri.moveTo(x, t.top() - 1)
+            tri.lineTo(x - 7, t.top() - 11)
+            tri.lineTo(x + 7, t.top() - 11)
             tri.closeSubpath()
             p.drawPath(tri)
             p.setPen(QPen(QColor("white"), 3))
-            p.drawLine(QPointF(ax, t.top() - 2), QPointF(ax, t.bottom() + 2))
+            p.drawLine(QPointF(x, t.top() - 1), QPointF(x, t.bottom() + 1))
             fb = QFont(self.font())
+            fb.setPixelSize(13)
             fb.setBold(True)
             p.setFont(fb)
-            tw = 130
-            tx = min(max(ax - tw / 2, 0), self.width() - tw)
-            p.drawText(QRectF(tx, 0, tw, 18), Qt.AlignHCenter | Qt.AlignVCenter, tr("Real", "Actual") + f": {self._answer * 100:.1f}%")
-
-        # alça do palpite
-        c = QPointF(gx, t.center().y())
-        p.setPen(QPen(QColor(0, 0, 0, 80), 4))
-        p.setBrush(QColor("white") if not self._locked else QColor(220, 220, 220))
-        p.drawEllipse(c, 13, 13)
-        p.setPen(Qt.NoPen)
-        p.setBrush(GOLD if self.hasFocus() and not self._locked else QColor("#2b2f33"))
-        p.drawEllipse(c, 5, 5)
+            txt = getattr(self, "_caption", None) or tr(f"Sua chance: {self._value * 100:.0f}%",
+                                                         f"Your chance: {self._value * 100:.0f}%")
+            w = p.fontMetrics().horizontalAdvance(txt) + 12
+            p.drawText(QRectF(min(max(x - w / 2, 0), self.width() - w), 2, w, 18), Qt.AlignCenter, txt)

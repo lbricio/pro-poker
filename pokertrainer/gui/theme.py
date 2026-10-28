@@ -30,13 +30,30 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #ffd65e; }
 QPushButton#primary:disabled { background: rgba(245,197,66,0.35); color: rgba(0,0,0,0.5); }
-QPushButton#mode { padding: 12px 14px; }
+QPushButton#mode { padding: 8px 14px; }
 QPushButton#fold {
     background: rgba(255,107,107,0.16); border: 1px solid rgba(255,107,107,0.55); color: #ffd0d0;
     text-align: center; font-size: 16px; font-weight: 800; padding: 12px 22px; border-radius: 12px;
 }
 QPushButton#fold:hover { background: rgba(255,107,107,0.28); }
-QPushButton#fold:disabled { color: rgba(255,255,255,0.4); }
+QPushButton#secondary {
+    background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.28); color: white;
+    text-align: center; font-size: 16px; font-weight: 800; padding: 12px 22px; border-radius: 12px;
+}
+QPushButton#secondary:hover { background: rgba(255,255,255,0.20); }
+QPushButton#secondary:disabled { color: rgba(255,255,255,0.35); }
+QPushButton#fold:disabled { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+                            color: rgba(255,255,255,0.28); }
+QPushButton#danger {
+    background: rgba(255,107,107,0.10); border: 1px solid rgba(255,107,107,0.45); color: #ffc4c4;
+    text-align: center; padding: 8px 16px;
+}
+QPushButton#danger:hover { background: rgba(255,107,107,0.22); }
+QPushButton#tileButton {
+    background: rgba(12,18,20,0.62); border: 1px solid rgba(255,255,255,0.12); border-radius: 16px;
+    text-align: left; padding: 0;
+}
+QPushButton#tileButton:hover { background: rgba(28,38,40,0.80); border: 1px solid rgba(245,197,66,0.55); }
 QPushButton#chip {
     background: rgba(0,0,0,0.30); border: 1px solid rgba(255,255,255,0.14); border-radius: 13px;
     padding: 4px 12px; font-size: 12px; font-weight: 700; color: #c8d6d1; text-align: center;
@@ -47,7 +64,7 @@ QPushButton#chip::menu-indicator { subcontrol-position: right center; subcontrol
 QMenu { background: #1d2529; border: 1px solid #3a4a44; padding: 4px; }
 QMenu::item { padding: 6px 22px 6px 22px; border-radius: 6px; }
 QMenu::item:selected { background: #3a4a44; }
-QPushButton#nav { background: transparent; border: 1px solid transparent; padding: 8px 12px; }
+QPushButton#nav { background: transparent; border: 1px solid transparent; padding: 6px 12px; }
 QPushButton#nav:hover { background: rgba(255,255,255,0.08); }
 QPushButton#nav:checked { background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.12); color: white; }
 

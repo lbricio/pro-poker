@@ -12,7 +12,7 @@ from pokertrainer.i18n import tr
 DEFAULTS = {
     "opponents": 1,
     "random_opponents": False,
-    "opp_range": 100,
+    "opp_range": 0,          # faixa dos oponentes no treino: 0 = conforme a ação; senão top X% fixo
     "difficulty": "medium",
     "play_opponents": 5,
     "play_speed": "normal",
@@ -21,9 +21,12 @@ DEFAULTS = {
     "sounds": True,
     "volume": 70,
     "play_autonext": False,
+    "play_sidebar": True,     # menu lateral visível na mesa (cash game e torneio)
+    "play_log": True,         # histórico visível na mesa
+    "show_bb": False,         # valores da mesa em big blinds
+    "show_mucked": False,     # mostrar as cartas de quem descartou no showdown (aprendizado)
     "language": "pt",
     "iterations": 50000,
-    "tolerance": 5,
     "blur": 26,
     "show_hand_name": True,
     "animations": True,
@@ -41,7 +44,7 @@ def precisions() -> list[tuple[str, int]]:
 @dataclass(frozen=True)
 class Mode:
     key: str
-    visible: int  # cartas visíveis na mesa (-1 = sorteia flop ou turn a cada mão; -2 = cash game; -3 = torneio)
+    visible: int  # cartas visíveis na mesa no treino (0, 3, 4, 5); -2 = cash game; -3 = torneio
     _title: tuple[str, str]
     _subtitle: tuple[str, str]
 
@@ -55,15 +58,15 @@ class Mode:
 
     @property
     def is_play(self) -> bool:
-        """Modo de jogo (mesa contra bots), não de treino de probabilidades."""
+        """Modo de jogo (mesa contra bots), não de treino de decisões."""
         return self.visible <= -2
 
 
 MODES = [
-    Mode("preflop", 0, ("Pré-flop", "Pre-flop"), ("Só as 2 cartas da mão", "Just your 2 hole cards")),
-    Mode("flop", 3, ("Flop", "Flop"), ("2 cartas + 3 na mesa", "2 cards + 3 on the board")),
-    Mode("turn", 4, ("Turn", "Turn"), ("2 cartas + 4 na mesa", "2 cards + 4 on the board")),
-    Mode("potodds", -1, ("Pot odds", "Pot odds"), ("Pagar ou desistir?", "Call or fold?")),
+    Mode("preflop", 0, ("Pré-flop", "Pre-flop"), ("Só as suas 2 cartas", "Just your 2 hole cards")),
+    Mode("flop", 3, ("Flop", "Flop"), ("3 cartas na mesa", "3 cards on the board")),
+    Mode("turn", 4, ("Turn", "Turn"), ("4 cartas na mesa", "4 cards on the board")),
+    Mode("river", 5, ("River", "River"), ("Mesa completa", "Full board")),
     Mode("play", -2, ("Cash game", "Cash game"),
          ("Recompra à vontade", "Rebuy anytime")),
     Mode("tournament", -3, ("Torneio", "Tournament"),
@@ -90,38 +93,37 @@ def put(key: str, value) -> None:
 
 @dataclass
 class Stats:
-    rounds: int = 0
-    hits: int = 0
-    total_error: float = 0.0
+    """Totais do treino de decisões num modo."""
+    hands: int = 0
+    best: int = 0          # melhor jogada
+    good: int = 0          # melhor jogada ou aceitável
     points: int = 0
-    streak: int = 0
+    streak: int = 0        # decisões seguidas sem erro
     best_streak: int = 0
-    decisions: int = 0
-    good_decisions: int = 0
-    ev: float = 0.0
+    ev: float = 0.0        # fichas ganhas/perdidas em média nas decisões de pagar ou desistir
 
     @property
-    def avg_error(self) -> float:
-        return self.total_error / self.rounds if self.rounds else 0.0
+    def best_rate(self) -> float:
+        return self.best / self.hands if self.hands else 0.0
 
     @property
-    def hit_rate(self) -> float:
-        return self.hits / self.rounds if self.rounds else 0.0
+    def good_rate(self) -> float:
+        return self.good / self.hands if self.hands else 0.0
 
 
 def load_stats(mode: str) -> Stats:
     s = app_settings()
-    s.beginGroup(f"stats/{mode}")
-    st = Stats(int(s.value("rounds", 0)), int(s.value("hits", 0)), float(s.value("total_error", 0.0)),
-               int(s.value("points", 0)), int(s.value("streak", 0)), int(s.value("best_streak", 0)),
-               int(s.value("decisions", 0)), int(s.value("good_decisions", 0)), float(s.value("ev", 0.0)))
+    s.beginGroup(f"train/{mode}")
+    st = Stats()
+    for k, v in st.__dict__.items():
+        setattr(st, k, type(v)(s.value(k, v)))
     s.endGroup()
     return st
 
 
 def save_stats(mode: str, st: Stats) -> None:
     s = app_settings()
-    s.beginGroup(f"stats/{mode}")
+    s.beginGroup(f"train/{mode}")
     for k, v in st.__dict__.items():
         s.setValue(k, v)
     s.endGroup()
@@ -129,8 +131,8 @@ def save_stats(mode: str, st: Stats) -> None:
 
 def reset_stats() -> None:
     s = app_settings()
-    s.remove("stats")
-    s.remove("history")
+    for k in ("stats", "history", "train", "decisions", "tourn"):   # "stats"/"history": versões antigas
+        s.remove(k)
     s.remove("play")
     s.remove("play_curve")
 
@@ -141,7 +143,7 @@ HISTORY_MAX = 500
 
 
 def load_history() -> list[dict]:
-    raw = app_settings().value("history", "")
+    raw = app_settings().value("decisions", "")
     try:
         data = json.loads(raw) if raw else []
     except (TypeError, ValueError):
@@ -152,7 +154,7 @@ def load_history() -> list[dict]:
 def append_history(entry: dict) -> None:
     h = load_history()
     h.append(entry)
-    app_settings().setValue("history", json.dumps(h[-HISTORY_MAX:], separators=(",", ":")))
+    app_settings().setValue("decisions", json.dumps(h[-HISTORY_MAX:], separators=(",", ":")))
 
 
 # ---------------------------------------------------------------- jogo simulado: totais acumulados entre partidas
@@ -210,3 +212,28 @@ def load_play_curve() -> list[float]:
     except (TypeError, ValueError):
         return []
     return data if isinstance(data, list) else []
+
+
+# ---------------------------------------------------------------- torneio: resultados por dificuldade
+
+def load_tourn_stats(difficulty: str) -> dict:
+    """{"played", "wins", "best"} do torneio numa dificuldade (best = melhor colocação, 0 = nenhuma)."""
+    s = app_settings()
+    s.beginGroup(f"tourn/{difficulty}")
+    d = {k: int(s.value(k, 0)) for k in ("played", "wins", "best")}
+    s.endGroup()
+    return d
+
+
+def add_tourn_result(difficulty: str, played: int = 0, place: int = 0) -> None:
+    """Soma um torneio começado (`played`) e/ou a colocação final (`place`; 1 = título)."""
+    d = load_tourn_stats(difficulty)
+    d["played"] += played
+    if place:
+        d["wins"] += place == 1
+        d["best"] = place if not d["best"] else min(d["best"], place)
+    s = app_settings()
+    s.beginGroup(f"tourn/{difficulty}")
+    for k, v in d.items():
+        s.setValue(k, v)
+    s.endGroup()

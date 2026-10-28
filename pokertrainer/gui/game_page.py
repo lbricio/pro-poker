@@ -1,4 +1,4 @@
-"""Tela do jogo: cartas, barra de palpite e revelação."""
+"""Treino de decisões: cartas, a situação de aposta, os botões de ação e a análise da jogada."""
 
 from __future__ import annotations
 
@@ -8,41 +8,34 @@ from dataclasses import dataclass
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QMenu, QScrollArea, QPushButton, QSizePolicy, QVBoxLayout,
-    QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QMenu, QScrollArea, QPushButton, QSizePolicy, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from pokertrainer import coach
+from pokertrainer import decision as D
 from pokertrainer import engine as E
 from pokertrainer import settings as S
 from pokertrainer.i18n import tr
 from pokertrainer.gui import sound
-from pokertrainer.gui.widgets import CARD_RATIO, CardWidget, DeckButton, Glass, GuessBar, PillLabel
+from pokertrainer.gui.widgets import CARD_RATIO, CardWidget, DecisionMeter, DeckButton, Glass, PillLabel
 
 
 @dataclass
 class RoundResult:
     mode: S.Mode
     deal: E.Deal
-    guess: int
     eq: E.EquityResult
-    error_pp: float
-    rating: coach.Rating
+    spot: D.Spot
+    verdict: D.Verdict
     hero_score: int
     opp_scores: list[int]
     outcome: str          # "win" | "tie" | "lose"
     tips: list[tuple[str, list[str]]]   # (título da seção, dicas)
     n_opp: int
-    replay: bool = False  # mão reexibida (ex.: troca de idioma): não conta nas estatísticas
-    spot: coach.PotSpot | None = None     # modo pot odds
-    called: bool | None = None
-    good_decision: bool | None = None
-    range_pct: int = 100
+    replay: bool = False  # mão reexibida (ex.: troca de idioma ou revisão): não conta nas estatísticas
+    range_pct: int = 0
     hand_type: str = ""
-
-
-def question() -> str:
-    return tr("Qual a chance de a sua mão vencer?", "What is your hand's chance of winning?")
 
 
 # ---------------------------------------------------------------- cálculo em segundo plano
@@ -52,19 +45,37 @@ class _Signals(QObject):
 
 
 class EquityJob(QRunnable):
-    def __init__(self, token: int, hero, board, n_opp: int, iters: int, combos=None) -> None:
+    """Chance da sua mão contra as faixas dos oponentes (a atual e a de quem pagaria a sua aposta/aumento)."""
+
+    def __init__(self, token: int, deal: E.Deal, spot: D.Spot, n_opp: int, iters: int,
+                 fixed_pct: int | None) -> None:
         super().__init__()
-        self.token, self.hero, self.board, self.n_opp, self.iters = token, hero, board, n_opp, iters
-        self.combos = combos
+        self.token, self.deal, self.spot, self.n_opp, self.iters = token, deal, spot, n_opp, iters
+        self.fixed_pct = fixed_pct
         self.signals = _Signals()
         self.cancelled = False
 
     def run(self) -> None:
         stop = lambda: self.cancelled  # noqa: E731
-        r = E.equity(self.hero, self.board, self.n_opp, self.iters, cancel=stop, opp_combos=self.combos)
-        if self.combos is not None and not self.cancelled:
-            # para comparar: a mesma mão contra cartas aleatórias
-            r.vs_random = E.equity(self.hero, self.board, self.n_opp, max(4000, self.iters // 4), cancel=stop).equity
+        d, sp = self.deal, self.spot
+        board = d.visible_board
+        now = D.opponent_ranges(sp, d, fixed_pct=self.fixed_pct)[: self.n_opp]
+        iters = max(8000, self.iters // max(1, self.n_opp // 2))   # multiway: cada simulação custa mais
+        r = E.equity(d.hero, board, self.n_opp, iters, cancel=stop, opp_ranges=now)
+        if self.cancelled:
+            return
+        # contra quem pagaria a sua aposta/aumento (só faz diferença depois do flop ou contra um aumento)
+        after = "call_raise" if sp.facing_bet else "call"
+        if sp.street == 0 and sp.kind == "vs_raise":
+            call_ranges = [list(D.R.band_combos(0, max(D.R.THREEBET_PCT * 2, sp.pre[0][1] // 2)))] + now[1:]
+        elif sp.street >= 3 and self.fixed_pct is None:
+            call_ranges = D.opponent_ranges(sp, d, after=after)[: self.n_opp]
+        else:
+            call_ranges = now
+        r.eq_call = E.equity(d.hero, board, self.n_opp, max(4000, self.iters // 3), cancel=stop,
+                             opp_ranges=call_ranges).equity if call_ranges is not now else r.equity
+        if not self.cancelled:
+            r.vs_random = E.equity(d.hero, board, self.n_opp, max(4000, self.iters // 4), cancel=stop).equity
         if not self.cancelled:
             self.signals.done.emit(self.token, r)
 
@@ -131,12 +142,12 @@ class TipsPanel(Glass):
 
     def show_waiting(self) -> None:
         self.body.setText("<p style='color:#9fb3ad'>" + tr(
-            "Confirme seu palpite para ver as dicas sobre esta mão: onde você errou, o que aconteceu na mesa e "
-            "como estimar melhor.",
-            "Confirm your guess to see tips about this hand: where you went wrong, what happened on the board "
-            "and how to estimate better.") + "</p>")
+            "Escolha sua jogada para ver a análise: a sua chance real, o preço da aposta, a melhor jogada e o que "
+            "aconteceu nas cartas seguintes.",
+            "Make your play to see the analysis: your actual chance, the price of the bet, the best play and "
+            "what happened on the next cards.") + "</p>")
 
-    def show_tips(self, rating, sections: list[tuple[str, list[str]]]) -> None:
+    def show_tips(self, sections: list[tuple[str, list[str]]]) -> None:
         html = []
         for name, items in sections:
             if not items:
@@ -252,8 +263,8 @@ class DeckView(QWidget):
     def hideEvent(self, e) -> None:
         super().hideEvent(e)
         par = self.parentWidget()
-        if hasattr(par, "bar"):
-            par.bar.setFocus()
+        if hasattr(par, "panel"):
+            par.setFocus()
 
 
 class _CardArea(QWidget):
@@ -274,16 +285,17 @@ class GamePage(QWidget):
         self.mode: S.Mode | None = None
         self.deal: E.Deal | None = None
         self.eq: E.EquityResult | None = None
+        self.spot: D.Spot | None = None
+        self.action: str | None = None      # jogada escolhida (None = ainda não decidiu)
         self.revealed = False
         self._token = 0
         self._job: EquityJob | None = None
         self._pending_reveal = False
         self.rng = random.Random()
-        self.spot: coach.PotSpot | None = None
-        self.called: bool | None = None
         self.range_pct = 100
         self.focus_type: str | None = None
         self.n_opp = 1
+        self.setFocusPolicy(Qt.StrongFocus)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 18, 24, 18)
@@ -342,6 +354,8 @@ class GamePage(QWidget):
             rmenu.addAction(a)
         self.range_btn.setMenu(rmenu)
         orow.addWidget(self.range_btn)
+        for b in (self.opp_btn, self.rand_btn, self.range_btn):
+            b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.focus_btn = QPushButton()
         self.focus_btn.setObjectName("chip")
         self.focus_btn.setCheckable(True)
@@ -363,7 +377,7 @@ class GamePage(QWidget):
         self.seats: list[Seat] = []
 
         al.addStretch(1)
-        # pote (modo pot odds)
+        # pote e aposta da situação
         self.pot_lbl = QLabel(" ")
         self.pot_lbl.setAlignment(Qt.AlignCenter)
         self.pot_lbl.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffe7a3;")
@@ -422,50 +436,72 @@ class GamePage(QWidget):
         row.addWidget(self.tips_panel)
         root.addLayout(row, 1)
 
-        # painel do palpite
+        # painel da decisão
         self.panel = Glass(alpha=165)
         pv = QVBoxLayout(self.panel)
-        pv.setContentsMargins(22, 14, 22, 16)
-        pv.setSpacing(6)
+        pv.setContentsMargins(22, 14, 22, 12)
+        pv.setSpacing(8)
         top = QHBoxLayout()
-        self.q_title = q = QLabel(question())
-        q.setStyleSheet("font-size: 16px; font-weight: 700;")
-        self.q_sub = QLabel("")
+        top.setSpacing(8)
+        qv = QVBoxLayout()
+        qv.setSpacing(2)
+        self.q_title = QLabel(" ")
+        self.q_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.q_title.setWordWrap(True)
+        self.q_sub = QLabel(" ")
         self.q_sub.setObjectName("muted")
         self.q_sub.setWordWrap(True)
-        qv = QVBoxLayout()
-        qv.setSpacing(0)
-        qv.addWidget(q)
+        qv.addWidget(self.q_title)
         qv.addWidget(self.q_sub)
         top.addLayout(qv, 1)
-        self.value_lbl = QLabel("50%")
-        self.value_lbl.setObjectName("bigValue")
-        top.addWidget(self.value_lbl)
-        top.addSpacing(16)
-        self.action_btn = QPushButton(tr("Confirmar", "Confirm"))
-        self.action_btn.setObjectName("primary")
-        self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setMinimumWidth(170)
-        self.action_btn.clicked.connect(self._on_action)
-        top.addWidget(self.action_btn)
-        self.fold_btn = QPushButton(tr("Desistir", "Fold"))
-        self.fold_btn.setObjectName("fold")
-        self.fold_btn.setCursor(Qt.PointingHandCursor)
-        self.fold_btn.setMinimumWidth(120)
-        self.fold_btn.setToolTip(tr("Desistir da mão (tecla F)", "Fold the hand (F key)"))
-        self.fold_btn.clicked.connect(lambda: self._decide(False))
-        self.call_btn = QPushButton()
-        self.call_btn.setObjectName("primary")
-        self.call_btn.setCursor(Qt.PointingHandCursor)
-        self.call_btn.setMinimumWidth(150)
-        self.call_btn.setToolTip(tr("Pagar a aposta (tecla C)", "Call the bet (C key)"))
-        self.call_btn.clicked.connect(lambda: self._decide(True))
-        top.addWidget(self.fold_btn)
-        top.addWidget(self.call_btn)
+        top.addSpacing(10)
+        self.act_btns: dict[str, QPushButton] = {}
+        for key, obj, tip in ((D.FOLD, "fold", tr("Desistir da mão (F)", "Fold the hand (F)")),
+                              ("passive", "secondary", tr("Passar ou pagar (C)", "Check or call (C)")),
+                              ("aggressive", "primary", tr("Apostar ou aumentar (R)", "Bet or raise (R)"))):
+            b = QPushButton()
+            b.setObjectName(obj)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(150)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=key: self._act(k))
+            self.act_btns[key] = b
+            top.addWidget(b)
+        self.next_btn = QPushButton(tr("Próxima mão (Espaço)  ▸", "Next hand (Space)  ▸"))
+        self.next_btn.setObjectName("primary")
+        self.next_btn.setCursor(Qt.PointingHandCursor)
+        self.next_btn.setMinimumWidth(190)
+        self.next_btn.setToolTip(tr("Próxima mão (Espaço, Enter ou S)", "Next hand (Space, Enter or S)"))
+        self.next_btn.clicked.connect(lambda: self.new_round())   # clicked passa "checked": não repassar
+        top.addWidget(self.next_btn)
         pv.addLayout(top)
-        self.bar = GuessBar()
-        self.bar.valueChanged.connect(lambda v: self.value_lbl.setText(f"{v}%"))
-        pv.addWidget(self.bar)
+        # tamanho da aposta/aumento (a nota também avalia o tamanho)
+        self.size_row = QWidget()
+        sr = QHBoxLayout(self.size_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        sr.setSpacing(6)
+        sr.addStretch(1)
+        self.size_lbl = QLabel(tr("Tamanho:", "Size:"))
+        self.size_lbl.setObjectName("muted")
+        sr.addWidget(self.size_lbl)
+        self.size_btns: list[QPushButton] = []
+        for _ in range(4):
+            b = QPushButton()
+            b.setObjectName("chip")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, bt=b: self._pick_size(self.size_btns.index(bt)))
+            sr.addWidget(b)
+            self.size_btns.append(b)
+        self.size = 0
+        self.meter = DecisionMeter()
+        # antes da decisão: tamanhos; depois: o medidor (mesmo espaço, o painel não cresce)
+        self.lower = QStackedWidget()
+        self.lower.addWidget(self.size_row)
+        self.lower.addWidget(self.meter)
+        self.lower.setFixedHeight(36)
+        pv.addWidget(self.lower)
         root.addWidget(self.panel)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -487,7 +523,7 @@ class GamePage(QWidget):
 
     def set_random_opponents(self, on: bool) -> None:
         S.put("random_opponents", on)
-        # se ainda não palpitou, já sorteia; depois da revelação vale a partir da próxima mão
+        # antes da decisão já sorteia; depois dela vale a partir da próxima mão
         if on and not self.revealed:
             self.new_round()
 
@@ -507,20 +543,28 @@ class GamePage(QWidget):
             self.new_round()
 
     @property
-    def pot_mode(self) -> bool:
-        return self.mode is not None and self.mode.key == "potodds"
+    def fixed_pct(self) -> int | None:
+        """Faixa fixa dos oponentes (top X%, ignorando a ação) ou None = realista (conforme a ação)."""
+        return None if self.range_pct <= 0 else self.range_pct
 
-    def _deal_new(self, n_opp: int, combos) -> E.Deal:
-        visible = self.mode.visible if self.mode.visible >= 0 else self.rng.choice([3, 4])
+    def _deal_new(self, n_opp: int) -> tuple[E.Deal, D.Spot]:
+        """Situação e cartas coerentes: as dos oponentes saem das faixas de quem fez o que fez."""
+        visible = self.mode.visible
         if self.focus_type:
             want_pf = self.focus_type.startswith("pf_")
             if want_pf != (visible == 0):
-                visible = 0 if want_pf else (visible if visible > 0 else 3)
+                visible = 0 if want_pf else 3
+            elif self.focus_type == "pp_draw" and visible == 5:
+                visible = 3          # no river não há projeto
+        spot = D.make_spot(self.rng, visible, n_opp)
+        hb = D.deal_hero_board(spot, self.rng, n_opp)
+        if self.focus_type:
             for _ in range(4000):
-                d = E.deal(visible, n_opp, self.rng, combos)
-                if coach.hand_type(d) == self.focus_type:
-                    return d
-        return E.deal(visible, n_opp, self.rng, combos)
+                if coach.hand_type(E.Deal(hb.hero, hb.board, [], hb.visible)) == self.focus_type:
+                    break
+                spot.hero_pre = (0, 100)     # no treino focado, qualquer mão do tipo
+                hb = D.deal_hero_board(spot, self.rng, n_opp)
+        return D.deal_opponents(spot, hb, self.rng, n_opp, self.fixed_pct), spot
 
     def _update_opp_button(self) -> None:
         n = self.n_opp
@@ -535,9 +579,9 @@ class GamePage(QWidget):
         for a in self.range_actions.actions():
             a.setChecked(a.data() == self.range_pct)
 
-    def new_round(self, deal: E.Deal | None = None, spot: coach.PotSpot | None = None,
+    def new_round(self, deal: E.Deal | None = None, spot: D.Spot | None = None,
                   range_pct: int | None = None) -> None:
-        """Nova mão. `deal` (e `spot`/`range_pct`) retomam uma mão já distribuída: troca de idioma ou revisão."""
+        """Nova mão. `deal` e `spot` retomam uma mão já distribuída (troca de idioma ou revisão)."""
         if self.mode is None:
             return
         if deal is not None:
@@ -548,11 +592,14 @@ class GamePage(QWidget):
             n_opp = S.get("opponents")
         anim = S.get("animations") and deal is None
         self.n_opp = n_opp
-        self.range_pct = range_pct if range_pct is not None else (S.get("opp_range") if deal is None else 100)
-        self.combos = coach.range_combos(self.range_pct)
-        self.deal = d = deal or self._deal_new(n_opp, self.combos)
-        self.spot = spot if spot is not None else (coach.make_spot(self.rng, n_opp) if self.pot_mode else None)
-        self.called = None
+        self.range_pct = range_pct if range_pct is not None else (S.get("opp_range") if deal is None else 0)
+        if deal is not None:
+            self.deal = d = deal
+            self.spot = sp = spot if spot is not None else D.make_spot(self.rng, d.visible, n_opp)
+        else:
+            d, sp = self._deal_new(n_opp)
+            self.deal, self.spot = d, sp
+        self.action = None
         self.eq = None
         self.revealed = False
         self._pending_reveal = False
@@ -563,65 +610,52 @@ class GamePage(QWidget):
             sound.play("deal")
         for i, c in enumerate(self.hero_cards):
             c.set_card(d.hero[i], True, animate=anim, delay_ms=80 + 140 * i)
+            c.set_highlight(False)
+            c.set_dimmed(False)
         for i, c in enumerate(self.board_cards):
             c.set_card(d.board[i], i < d.visible, animate=anim, delay_ms=360 + 110 * i)
+            c.set_highlight(False)
+        acts = D.seat_actions(sp, n_opp)
         for k, seat in enumerate(self.seats):
             for j, c in enumerate(seat.cards):
                 c.set_card(d.opponents[k][j], False)
-            seat.info.setText(" ")
+                c.set_highlight(False)
+                c.set_dimmed(False)
+            seat.info.setText(acts[k])
+            seat.info.setToolTip("")
             seat.name.setStyleSheet("")
-        if self.spot:
-            for k, seat in enumerate(self.seats):
-                seat.info.setText(tr(f"apostou {self.spot.bet}", f"bet {self.spot.bet}") if k == 0 else
-                                  tr(f"pagou {self.spot.bet}", f"called {self.spot.bet}"))
 
         show_name = S.get("show_hand_name")
         self.hand_name.setText(E.describe_cards(d.hero + d.visible_board) if show_name else " ")
         self.board_name.setText(" ")
-        vis = tr({0: "antes do flop", 3: "após o flop", 4: "após o turn"}[d.visible],
-                 {0: "before the flop", 3: "after the flop", 4: "after the turn"}[d.visible])
-        street_key = {0: "preflop", 3: "flop", 4: "turn"}[d.visible]
-        sc = coach.scenario(street_key, n_opp)
+        pos = tr(f"Você: {sp.hero_pos}", f"You: {sp.hero_pos}") if sp.hero_pos else ""
+        pot_txt = tr(f"Pote {D.bb(sp.pot)}", f"Pot {D.bb(sp.pot)}")
+        bet_txt = tr(f"  ·  aposta {D.bb(sp.bet)}", f"  ·  bet {D.bb(sp.bet)}") if sp.facing_bet and sp.street else ""
+        self.pot_lbl.setText("💰  " + "  ·  ".join(x for x in (pos, pot_txt) if x) + bet_txt +
+                             tr(f"  ·  stack {D.bb(sp.stack)}", f"  ·  stack {D.bb(sp.stack)}"))
+        q, detail = D.situation(sp, n_opp)
         rng_txt = ""
-        if self.range_pct < 100:
-            # a escala pré-calculada vale para mãos aleatórias; contra faixas usa a escala inteira
-            sc = coach.Scenario(0, 100, sc.fair, [])
-            rng_txt = tr(f" Oponentes jogam só o {coach.range_name(self.range_pct)}.",
-                         f" Opponents only play the {coach.range_name(self.range_pct)}.")
-        if self.spot:
-            sp = self.spot
-            callers = tr(f", {sp.callers} pagaram", f", {sp.callers} called") if sp.callers else ""
-            self.pot_lbl.setText(tr(f"💰  Pote {sp.pot}  ·  Oponente 1 apostou {sp.bet}{callers}  ·  "
-                                    f"pagar {sp.to_call} → pote final {sp.final_pot}",
-                                    f"💰  Pot {sp.pot}  ·  Opponent 1 bet {sp.bet}{callers}  ·  "
-                                    f"call {sp.to_call} → final pot {sp.final_pot}"))
-            self.pot_lbl.show()
-            self.q_sub.setText(tr(f"{n_opp + 1} jogadores ({vis}). Estime sua chance e decida: pagar {sp.to_call} "
-                                  f"ou desistir?",
-                                  f"{n_opp + 1} players ({vis}). Estimate your chance and decide: call "
-                                  f"{sp.to_call} or fold?") + rng_txt)
-        else:
-            self.pot_lbl.hide()
-            self.q_sub.setText(tr(f"{n_opp + 1} jogadores na mesa ({vis}): a chance média é {sc.fair:.0f}%. "
-                                  "Sua mão está acima ou abaixo disso?",
-                                  f"{n_opp + 1} players at the table ({vis}): the average chance is {sc.fair:.0f}%. "
-                                  "Is your hand above or below that?") + rng_txt)
-        self.bar.set_answer(None)
-        self.bar.set_scale(sc.lo, sc.hi, sc.fair, sc.hist, captions=self.range_pct >= 100)
-        self.bar.set_threshold(None)
-        self.bar.setValue(sc.fair)
-        self.value_lbl.setText(f"{self.bar.value()}%")
-        self.q_title.setText(question())
-        self.action_btn.setText(tr("Confirmar", "Confirm"))
-        self.action_btn.setEnabled(True)
-        self.action_btn.setVisible(self.spot is None)
-        for b in (self.fold_btn, self.call_btn):
-            b.setVisible(self.spot is not None)
-            b.setEnabled(True)
-        if self.spot:
-            self.call_btn.setText(tr(f"Pagar {self.spot.to_call}", f"Call {self.spot.to_call}"))
-            self.fold_btn.setText(tr("Desistir", "Fold"))
-        self.bar.setFocus()
+        if self.fixed_pct is not None:
+            rng_txt = tr(f" Oponentes jogam o {coach.range_name(self.range_pct)}, sem levar em conta a ação.",
+                         f" Opponents play the {coach.range_name(self.range_pct)}, regardless of their action.")
+        self.q_title.setText(q)
+        self.q_sub.setText(detail + rng_txt)
+        fold, passive, aggressive = sp.actions()
+        self.act_btns[D.FOLD].setText(tr("Desistir", "Fold"))
+        self.act_btns[D.FOLD].setEnabled(sp.can_fold)
+        self.act_btns[D.FOLD].setToolTip(tr("Desistir da mão (F)", "Fold the hand (F)") if sp.can_fold else
+                                         tr("Ninguém apostou: passar é de graça.", "Nobody bet: checking is free."))
+        self.act_btns["passive"].setText(D.button_text(sp, passive))
+        self._setup_sizes()
+        self.act_btns["passive"].setEnabled(True)
+        self.act_btns["aggressive"].setEnabled(True)
+        for b in self.act_btns.values():
+            b.show()
+        self.next_btn.hide()
+        self.meter.clear("")
+        self.lower.setCurrentWidget(self.size_row)
+        self.lower.setFixedHeight(36)
+        self.setFocus()
         self.tips_panel.show_waiting()
         self.deck_view.hide()
         self._update_deck()
@@ -647,31 +681,60 @@ class GamePage(QWidget):
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
+        wide = self.width() >= 980
+        self.tips_panel.setFixedWidth(340 if wide else 280)
+        for b in self.act_btns.values():
+            b.setMinimumWidth(150 if wide else 112)
         self.deck_view.resize_to_parent()
 
-    def restore(self, mode: S.Mode, deal: E.Deal, eq: E.EquityResult | None, guess: int, revealed: bool,
-                spot: coach.PotSpot | None = None, called: bool | None = None, range_pct: int = 100) -> None:
-        """Mostra de novo uma mão (mesmas cartas, palpite e resultado), sem animação nem contar pontos."""
+    def restore(self, mode: S.Mode, deal: E.Deal, eq: E.EquityResult | None, spot: D.Spot, action: str | None,
+                revealed: bool, range_pct: int = 0, size: int = 0) -> None:
+        """Mostra de novo uma mão (mesmas cartas, situação e jogada), sem animação nem contar pontos."""
         self.mode = mode
         self.new_round(deal, spot=spot, range_pct=range_pct)
-        self.called = called
         if eq is not None:
             if self._job is not None:
                 self._job.cancelled = True
                 self._job = None
             self._token += 1
             self.eq = eq
-        self.bar.setValue(guess)
-        self.value_lbl.setText(f"{self.bar.value()}%")
         if revealed and eq is not None:
+            self.action = action
+            if size:
+                self.size = size
             self._reveal(replay=True)
+
+    def _setup_sizes(self) -> None:
+        """Botões de tamanho da aposta/aumento (só aparecem quando há mais de uma opção)."""
+        sp = self.spot
+        sizes = sp.sizes or [("", sp.hero_bet)]
+        many = len(sp.sizes) > 1
+        self.size_lbl.setVisible(many)
+        for i, b in enumerate(self.size_btns):
+            label = sizes[i][0] if i < len(sizes) else ""
+            if label and sp.street and label in ("⅓", "½", "⅔"):
+                label += tr(" pote", " pot")
+            b.setText(label)
+            b.setVisible(many and bool(label))
+        self.size_row.setEnabled(True)
+        default = min(range(len(sizes)), key=lambda i: abs(sizes[i][1] - sp.hero_bet))
+        self._pick_size(default)
+
+    def _pick_size(self, i: int) -> None:
+        sp = self.spot
+        sizes = sp.sizes or [("", sp.hero_bet)]
+        i = max(0, min(i, len(sizes) - 1))
+        self.size = sizes[i][1]
+        for k, b in enumerate(self.size_btns):
+            b.setChecked(k == i)
+        self.act_btns["aggressive"].setText(D.button_text(sp, sp.actions()[2], self.size))
 
     def _start_equity(self) -> None:
         if self._job is not None:
             self._job.cancelled = True
         self._token += 1
         d = self.deal
-        job = EquityJob(self._token, d.hero, d.visible_board, self.n_opp, S.get("iterations"), self.combos)
+        job = EquityJob(self._token, d, self.spot, self.n_opp, S.get("iterations"), self.fixed_pct)
         job.signals.done.connect(self._on_equity)
         self._job = job
         QThreadPool.globalInstance().start(job)
@@ -685,59 +748,91 @@ class GamePage(QWidget):
         if self._pending_reveal:
             self._reveal()
 
-    def _on_action(self) -> None:
-        if self.revealed:
-            self.new_round()
-        elif self.spot is not None:
-            return  # no modo pot odds a resposta é pagar ou desistir
-        elif self.eq is None:
-            self._pending_reveal = True
-            self.action_btn.setText(tr("Calculando…", "Calculating…"))
-            self.action_btn.setEnabled(False)
-        else:
-            self._reveal()
-
-    def _decide(self, called: bool) -> None:
-        if self.revealed or self.spot is None:
+    def _act(self, which: str) -> None:
+        """`which`: "fold", "passive" (passar/pagar) ou "aggressive" (apostar/aumentar)."""
+        if self.revealed or self.spot is None or self.action is not None:
             return
-        self.called = called
+        fold, passive, aggressive = self.spot.actions()
+        action = {"fold": fold, "passive": passive, "aggressive": aggressive}[which]
+        if action == D.FOLD and not self.spot.can_fold:
+            return
+        self.size_row.setEnabled(False)
+        self.action = action
+        sound.play({D.FOLD: "fold", D.CHECK: "check", D.CALL: "call", D.BET: "bet", D.RAISE: "bet"}[action])
         if self.eq is None:
             self._pending_reveal = True
-            for b in (self.fold_btn, self.call_btn):
+            for b in self.act_btns.values():
                 b.setEnabled(False)
-            (self.call_btn if called else self.fold_btn).setText(tr("Calculando…", "Calculating…"))
+            self.act_btns[which].setText(tr("Calculando…", "Calculating…"))
         else:
             self._reveal()
 
+    def _verdict(self) -> D.Verdict:
+        d = self.deal
+        outs = D.R.draw_outs(d.hero, d.visible_board)
+        return D.evaluate(self.spot, self.eq.equity, self.n_opp, outs, self.action,
+                          eq_call=getattr(self.eq, "eq_call", None), hero=d.hero, board=d.visible_board,
+                          size=self.size if self.action in (D.BET, D.RAISE) else None)
+
+    def _meter_result(self, v: D.Verdict) -> None:
+        sp = self.spot
+        if sp.kind == "open":
+            lim = 1 - D.R.open_pct(sp.hero_pos) / 100
+            zones = [(0.0, lim, D.FOLD, D.action_name(D.FOLD)), (lim, 1.0, D.RAISE, tr("Abrir", "Open"))]
+            marks = [(lim, tr(f"abrir do {sp.hero_pos}: top {D.R.open_pct(sp.hero_pos)}%",
+                              f"open from {sp.hero_pos}: top {D.R.open_pct(sp.hero_pos)}%"))]
+            self.meter.set_result(zones, marks, 1 - v.pct / 100, v.best,
+                                  tr(f"Sua mão: top {v.pct:.0f}%", f"Your hand: top {v.pct:.0f}%"))
+            return
+        if sp.kind == "limped":
+            fair = 1 / (self.n_opp + 1)
+            thr = fair + (1 - fair) * 0.2
+            zones = [(0.0, thr, D.CHECK, D.action_name(D.CHECK)), (thr, 1.0, D.RAISE, D.action_name(D.RAISE))]
+            marks = [(thr, tr(f"aumentar ≥ {thr:.0%}", f"raise ≥ {thr:.0%}"))]
+            self.meter.set_result(zones, marks, v.equity, v.best)
+            return
+        if sp.facing_bet:
+            need = max(0.0, v.need_eff or v.need)
+            second = v.best if v.best in (D.CALL, D.RAISE) else D.CALL
+            zones = [(0.0, need, D.FOLD, D.action_name(D.FOLD)), (need, 1.0, second, D.action_name(second))]
+            marks = [(need, tr(f"pagar ≥ {need:.0%}", f"call ≥ {need:.0%}"))]
+            self.meter.set_result(zones, marks, v.equity, v.best,
+                                  tr(f"Sua chance contra a faixa deles: {v.equity:.0%}",
+                                     f"Your chance vs their range: {v.equity:.0%}"))
+            return
+        thr = D.value_threshold(self.n_opp)
+        zones = [(0.0, thr, D.CHECK, D.action_name(D.CHECK)), (thr, 1.0, D.BET, D.action_name(D.BET))]
+        marks = [(thr, tr(f"apostar por valor ≥ {thr:.0%}", f"value bet ≥ {thr:.0%}"))]
+        self.meter.set_result(zones, marks, v.value, v.best,
+                              tr(f"Contra quem pagaria: {v.value:.0%}", f"Vs. hands that would call: {v.value:.0%}"))
+
     def _reveal(self, replay: bool = False) -> None:
-        d, r = self.deal, self.eq
+        d, r, sp = self.deal, self.eq, self.spot
         self.revealed = True
         self._pending_reveal = False
         anim = S.get("animations") and not replay
-        guess = self.bar.value()
-        err = abs(guess - r.equity * 100)
-        rating = coach.rate(err, S.get("tolerance"))
+        v = self._verdict()
 
         # cartas
         delay = 0
-        for k, seat in enumerate(self.seats):
+        for seat in self.seats:
             for c in seat.cards:
                 c.flip_up(delay, animate=anim)
                 delay += 70
         for i in range(d.visible, 5):
             self.board_cards[i].flip_up(delay + 150 * (i - d.visible), animate=anim)
-
-        if not replay:
+        if not replay and self.action:
             sound.play("flip")
-            if rating.hit:
-                QTimer.singleShot(450, lambda: sound.play("win" if rating.points >= 90 else "chip"))
+            if v.quality == "best":
+                QTimer.singleShot(450, lambda: sound.play("win"))
         hs, opp = E.showdown(d)
         best = max([hs] + opp)
         winners = (hs == best) + sum(o == best for o in opp)
         outcome = "win" if hs == best and winners == 1 else "tie" if hs == best else "lose"
         for k, seat in enumerate(self.seats):
             won = opp[k] == best
-            seat.info.setText(E.describe(opp[k]))
+            seat.info.setText(E.category_name(opp[k] >> 20))
+            seat.info.setToolTip(E.describe(opp[k]))
             seat.name.setStyleSheet("color: #f5c542; font-weight: 700;" if won else "")
             for c in seat.cards:
                 c.set_highlight(won)
@@ -750,52 +845,51 @@ class GamePage(QWidget):
         self.board_name.setText(tr("Na mesa: ", "On the board: ") + E.category_name(board_cat).lower()
                                 if board_cat else " ")
 
-        self.bar.set_answer(r.equity)
-        self.value_lbl.setText(f"{guess}%")
+        self._meter_result(v)
+        label, color = D.quality_label(v.quality)
+        best_txt = D.action_name(v.best).lower()
+        if self.action:
+            mine = D.action_name(self.action).lower()
+            head = f"<span style='color:{color}'>{label}</span> — "
+            self.q_title.setText(head + (tr(f"você escolheu {mine}.", f"you chose to {mine}.") if v.quality == "best"
+                                         else tr(f"você escolheu {mine}; o melhor era {best_txt}.",
+                                                 f"you chose to {mine}; the best play was to {best_txt}.")))
+        else:
+            self.q_title.setText(tr(f"Melhor jogada: {best_txt}.", f"Best play: {best_txt}."))
         res_txt = tr({"win": "você venceu", "tie": "deu empate", "lose": "você perdeu"}[outcome],
                      {"win": "you won", "tie": "it was a tie", "lose": "you lost"}[outcome])
-        head = f"<span style='color:{rating.color}'>{rating.label}</span> — "
-        self.q_title.setText(head + tr(f"chance real {r.equity * 100:.1f}%, seu palpite {guess}% "
-                                       f"(erro de {err:.1f} pontos)",
-                                       f"actual chance {r.equity * 100:.1f}%, your guess {guess}% "
-                                       f"(off by {err:.1f} points)"))
-        self.q_sub.setText(tr(f"Nesta rodada {res_txt}. Uma mão isolada não muda a probabilidade — veja a análise "
-                              "ao lado.",
-                              f"This round {res_txt}. A single hand doesn't change the probability — see the "
-                              "analysis on the side."))
-        good = None
-        tips = [(tr("Seu palpite", "Your guess"), coach.guess_feedback(d, r, self.n_opp, guess, S.get("tolerance"),
-                                                                     self.range_pct))]
-        if self.spot is not None and self.called is not None:
-            sp = self.spot
-            good = (r.equity >= sp.need) == self.called or abs(r.equity - sp.need) < 0.01
-            self.bar.set_threshold(sp.need * 100)
-            act = tr("pagou", "called") if self.called else tr("desistiu", "folded")
-            mark = ("<span style='color:#3ddc84'>" + tr("✔ decisão certa", "✔ right decision") if good else
-                    "<span style='color:#ff6b6b'>" + tr("✘ decisão errada", "✘ wrong decision")) + "</span>"
-            self.q_sub.setText(tr(f"Você {act}: {mark}. Precisava de {sp.need:.0%} para pagar; pagar vale "
-                                  f"{sp.ev_call(r.equity):+.0f} fichas em média. Nesta rodada {res_txt}.",
-                                  f"You {act}: {mark}. You needed {sp.need:.0%} to call; calling is worth "
-                                  f"{sp.ev_call(r.equity):+.0f} chips on average. This round {res_txt}."))
-            tips.append((tr("Pot odds", "Pot odds"), coach.decision_tips(sp, r.equity, self.called)))
-        tips += [
-            (tr("O que aconteceu", "What happened"), coach.runout_story(d, r, hs, opp)),
-            (tr("Por que esta mão vale isso", "Why this hand is worth that"),
-             coach.range_tips(d, r, self.range_pct) + coach.explain(d, r, self.n_opp)),
-        ]
-        self.action_btn.setText(tr("Próxima mão  ▸", "Next hand  ▸"))
-        self.action_btn.setEnabled(True)
-        self.action_btn.show()
-        self.fold_btn.hide()
-        self.call_btn.hide()
-        self.action_btn.setFocus()
+        price = (tr(f" · preço para pagar {v.need:.0%}", f" · price to call {v.need:.0%}")
+                 if sp.facing_bet and sp.kind != "open" else "")
+        if sp.kind == "open":
+            self.q_sub.setText(tr(f"Sua mão está no top {v.pct:.0f}%; do {sp.hero_pos} abre-se até o top "
+                                  f"{D.R.open_pct(sp.hero_pos)}%. Nesta mão {res_txt}.",
+                                  f"Your hand is in the top {v.pct:.0f}%; from {sp.hero_pos} you open up to the top "
+                                  f"{D.R.open_pct(sp.hero_pos)}%. This hand {res_txt}."))
+        else:
+            self.q_sub.setText(tr(f"Sua chance contra a faixa deles: {r.equity:.0%}{price}. Nesta mão {res_txt} — o "
+                                  "resultado de uma mão não muda a qualidade da decisão.",
+                                  f"Your chance vs their range: {r.equity:.0%}{price}. This hand {res_txt} — one "
+                                  "result doesn't change the quality of the decision."))
+        why = coach.explain(d, r, self.n_opp)
+        if self.fixed_pct is not None and self.fixed_pct < 100:
+            why = coach.range_tips(d, r, self.fixed_pct) + why
+        tips = [(tr("Sua decisão", "Your decision"),
+                 D.feedback(sp, v, self.n_opp, None if self.fixed_pct else r.vs_random)),
+                (tr("O que aconteceu", "What happened"), coach.runout_story(d, r, hs, opp)),
+                (tr("Por que esta mão vale isso", "Why this hand is worth that"), why)]
+        for b in self.act_btns.values():
+            b.hide()
+        self.lower.setCurrentWidget(self.meter)
+        self.lower.setFixedHeight(self.meter.height())
+        self.next_btn.show()
+        self.setFocus()
 
-        self.tips_panel.show_tips(rating, tips)
+        self.tips_panel.show_tips(tips)
         self._update_deck()
         self.roundFinished.emit(RoundResult(
-            mode=self.mode, deal=d, guess=guess, eq=r, error_pp=err, rating=rating, hero_score=hs,
-            opp_scores=opp, outcome=outcome, tips=tips, n_opp=self.n_opp, replay=replay, spot=self.spot,
-            called=self.called, good_decision=good, range_pct=self.range_pct, hand_type=coach.hand_type(d)))
+            mode=self.mode, deal=d, eq=r, spot=sp, verdict=v, hero_score=hs, opp_scores=opp, outcome=outcome,
+            tips=tips, n_opp=self.n_opp, replay=replay or not self.action, range_pct=self.range_pct,
+            hand_type=coach.hand_type(d)))
 
     # ------------------------------------------------------------ layout
     def _build_seats(self, n: int) -> None:
@@ -827,23 +921,31 @@ class GamePage(QWidget):
         opp_h = free * 0.20 / rows
         # limites por largura
         board_h = min(board_h, (w - 60) / 5 * CARD_RATIO * 0.88)
-        hero_h = min(hero_h, (w - 300) / 2.4 * CARD_RATIO, 340)
+        # linha da sua mão: [espaçador] 18 [carta] [carta] 18 [monte]; em áreas estreitas o espaçador some
+        narrow = w < 640
+        deck_w = 118
+        side = deck_w + 36 + (0 if narrow else deck_w)
+        hero_h = min(hero_h, (w - side - 20) / 2 / 1.06 * CARD_RATIO, 340)
         opp_h = min(opp_h, (w - 18 * cols) / (cols * 2) * CARD_RATIO * 0.88, board_h * 0.85)
         for c in self.hero_cards:
             c.set_card_height(int(hero_h))
         self.deck_btn.set_card_height(int(hero_h * 0.5))
-        self._deck_spacer.setFixedSize(self.deck_btn.width(), 1)
+        self._deck_spacer.setFixedSize(0 if narrow else self.deck_btn.width(), 1)
         for c in self.board_cards:
             c.set_card_height(int(board_h))
         for s in self.seats:
             s.set_height(int(max(44, opp_h)))
 
     def keyPressEvent(self, e) -> None:
-        if e.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
-            if self.action_btn.isEnabled():
-                self._on_action()
+        k = e.key()
+        if k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_S):
+            if self.revealed:
+                self.new_round()
             return
-        if self.spot is not None and not self.revealed and e.key() in (Qt.Key_F, Qt.Key_C):
-            self._decide(e.key() == Qt.Key_C)
-            return
+        if not self.revealed and self.action is None:
+            which = {Qt.Key_F: "fold", Qt.Key_C: "passive", Qt.Key_K: "passive", Qt.Key_R: "aggressive",
+                     Qt.Key_B: "aggressive"}.get(k)
+            if which:
+                self._act(which)
+                return
         super().keyPressEvent(e)

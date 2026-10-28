@@ -4,6 +4,7 @@ from itertools import combinations
 import pytest
 
 from pokertrainer import coach
+from pokertrainer import decision as D
 from pokertrainer import engine as E
 
 
@@ -97,12 +98,6 @@ def test_deal_unique_cards():
     assert len(allc) == len(set(allc)) == 2 + 5 + 18
 
 
-def test_rating():
-    assert coach.rate(1, 5).hit and coach.rate(1, 5).points == 95
-    assert not coach.rate(12, 5).hit
-    assert coach.rate(30, 5).points == 0
-
-
 def test_preflop_table_present():
     t = coach.preflop_table()
     assert t is not None and len(t[1]) == 169
@@ -112,7 +107,7 @@ def test_preflop_table_present():
 
 def test_explain_runs_for_all_modes():
     rng = random.Random(4)
-    for vis in (0, 3, 4):
+    for vis in (0, 3, 4, 5):
         for n in (1, 5):
             d = E.deal(vis, n, rng)
             r = E.equity(d.hero, d.visible_board, n, 500, rng)
@@ -122,27 +117,15 @@ def test_explain_runs_for_all_modes():
 def test_round_tips_on_many_random_deals():
     rng = random.Random(11)
     for i in range(300):
-        vis = (0, 3, 4)[i % 3]
+        vis = (0, 3, 4, 5)[i % 4]
         n = 1 + i % 9
         d = E.deal(vis, n, rng)
         r = E.equity(d.hero, d.visible_board, n, 300, rng)
         hs, opp = E.showdown(d)
-        assert coach.guess_feedback(d, r, n, rng.randint(0, 100), 5)
+        spot = D.make_spot(rng, vis, n)
+        v = D.evaluate(spot, r.equity, n, D.R.draw_outs(d.hero, d.visible_board), rng.choice(spot.actions()))
+        assert D.feedback(spot, v, n)
         assert coach.runout_story(d, r, hs, opp)
-
-
-def test_scenarios_scale():
-    sc = coach.scenario("preflop", 4)
-    assert sc.fair == pytest.approx(20)
-    assert 9 <= sc.lo <= 12 and 55 <= sc.hi <= 57          # 32o ≈ 11% … AA ≈ 56%
-    assert sum(sc.hist) == pytest.approx(1, abs=1e-3)
-    for mode in ("flop", "turn"):
-        for n in (1, 4, 9):
-            s = coach.scenario(mode, n)
-            assert s.hi == 100 and 0 <= s.lo < s.fair < s.hi
-            # média da distribuição ≈ fatia justa (simetria)
-            mean = sum((b + 0.5) * h for b, h in enumerate(s.hist))
-            assert mean == pytest.approx(s.fair, abs=2.5)
 
 
 def test_describe_english():
