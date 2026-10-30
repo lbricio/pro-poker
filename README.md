@@ -1,4 +1,7 @@
-# Poker Trainer
+# Pro Poker Trainer
+
+<img width="1624" height="969" alt="image" src="https://github.com/user-attachments/assets/33ec1870-da63-4ad1-806f-2084e3a531fb" />
+
 
 Simulador instrutivo de probabilidades de mãos de Texas Hold'em, para macOS e Linux (Python + PySide6).
 
